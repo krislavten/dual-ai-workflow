@@ -2,6 +2,28 @@
 
 双 AI 协作工作流工具 - 支持 Claude Code 和 Cursor Agent 动态角色协作
 
+## ✨ 新功能：全自动工作流
+
+使用 `/workflow` skill，无需手动在两个 AI 之间切换！
+
+```bash
+# 在 Claude Code 中
+/workflow 重构用户认证系统 claude
+```
+
+系统会自动：
+1. Claude 写方案
+2. 自动调用 Cursor Agent review
+3. 根据 review 自动修改
+4. 循环直到双方都 approve
+5. Claude 实现代码
+6. 自动调用 Cursor Agent review 代码
+7. 循环直到完成
+
+**你不需要做任何操作，只需要最后确认是否提交！**
+
+---
+
 ## 核心理念
 
 不固定 AI 角色，而是根据任务类型动态分配：
@@ -18,25 +40,57 @@
 
 ```bash
 # 克隆仓库
-git clone <your-repo-url> ~/.dual-ai-workflow
+git clone git@github.com:krislavten/dual-ai-workflow.git ~/develop/dual-ai-workflow
 
-# 添加到 PATH
-echo 'export PATH="$HOME/.dual-ai-workflow/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-
-# 或创建软链接
-ln -s ~/.dual-ai-workflow/bin/workflow ~/.local/bin/workflow
+# 运行安装脚本
+cd ~/develop/dual-ai-workflow
+./install.sh
 ```
 
-## 使用流程
+安装脚本会：
+- 创建 `workflow` 命令软链接到 `~/.local/bin/`
+- 安装 `/workflow` skill 到 `~/.claude/skills/`
 
-### 1. 在项目中初始化
+## 使用方式
+
+### 方式 1: 自动化 Skill（推荐）⚡
+
+在 Claude Code 中直接使用：
+
+```
+/workflow <任务描述> <执行者:claude|cursor>
+```
+
+**示例：**
+
+```
+/workflow 重构用户认证系统，使用JWT替换session claude
+```
+
+系统会：
+1. 自动创建任务
+2. 执行者写方案
+3. **自动调用**观察者 review（无需手动切换）
+4. 根据 review 自动修改方案
+5. 重复直到双方 approve
+6. 执行者实现代码
+7. **自动调用**观察者 review 代码
+8. 重复直到双方 approve
+9. 询问是否提交
+
+**全程自动，无需你参与！**
+
+### 方式 2: 命令行工具（手动模式）
+
+如果你想要手动控制每一步：
+
+#### 1. 在项目中初始化
 ```bash
 cd your-project
 workflow init
 ```
 
-### 2. 创建任务
+#### 2. 创建任务
 ```bash
 # Claude 作为执行者（适合重构、架构设计）
 workflow create "refactor-auth-system" claude
@@ -45,7 +99,7 @@ workflow create "refactor-auth-system" claude
 workflow create "fix-login-bug" cursor
 ```
 
-### 3. 完整工作流
+#### 3. 完整工作流
 
 ```bash
 # 编辑任务描述
