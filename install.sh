@@ -34,10 +34,20 @@ else
     exit 1
 fi
 
+# 安装 skill
+SKILLS_DIR="$HOME/.claude/skills"
+mkdir -p "${SKILLS_DIR}"
+ln -sf "${SCRIPT_DIR}/.skills/workflow" "${SKILLS_DIR}/dual-ai-workflow"
+echo -e "${GREEN}✓ 已安装 /workflow skill 到 ~/.claude/skills/${NC}"
+
 # 验证安装
 if command -v workflow &> /dev/null; then
     echo ""
     echo -e "${GREEN}✓ 安装成功！${NC}"
+    echo ""
+    echo -e "${YELLOW}使用方法:${NC}"
+    echo "  1. 命令行工具: workflow <command>"
+    echo "  2. Claude Code Skill: /workflow <task-description> <executor>"
     echo ""
     workflow help
 else
