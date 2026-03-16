@@ -43,16 +43,18 @@ Commit!
    - Save to `.workflow/plans/<task-id>/proposal.md`
 
 3. **Auto-review loop**
+   Use the CLI tool or call agent directly:
    ```bash
-   for round in 1..5; do
-     response=$(agent --print --mode=ask "Review this proposal: ...")
-     if [[ $response == *"APPROVE"* ]]; then
-       break
-     else
-       # Update proposal based on concerns
-       # Save as proposal-v{round}.md
-     fi
-   done
+   # Option A: Use CLI
+   workflow review-proposal <task-id>
+
+   # Option B: Call agent directly
+   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex "Review this proposal: ...")
+   if echo "$response" | grep -qi "APPROVE"; then
+     # approved
+   else
+     # address concerns, update proposal
+   fi
    ```
 
 4. **Implement code**
@@ -62,15 +64,16 @@ Commit!
 
 5. **Auto-code review loop**
    ```bash
-   for round in 1..5; do
-     diff=$(git diff)
-     response=$(agent --print --mode=ask "Review this code: $diff")
-     if [[ $response == *"APPROVE"* ]]; then
-       break
-     else
-       # Fix issues
-     fi
-   done
+   # Option A: Use CLI
+   workflow review-code <task-id>
+
+   # Option B: Call agent directly
+   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex "Review this code: $(git diff)")
+   if echo "$response" | grep -qi "APPROVE"; then
+     # approved
+   else
+     # fix issues
+   fi
    ```
 
 6. **Present final result**

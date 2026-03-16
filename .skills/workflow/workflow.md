@@ -82,7 +82,8 @@ When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
 4. **Executor ↔ Reviewer Iteration**
    ```
    while not approved and rounds < 5:
-     reviewer: call `agent --print --mode=ask "Review proposal: <content>"`
+     reviewer: call `workflow review-proposal <task-id>`
+       (internally runs: agent --print --trust --model $WORKFLOW_AGENT_MODEL)
      parse reviewer response
      if APPROVE:
        break
@@ -120,7 +121,8 @@ When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
    ```
    executor: implement code per proposal
    while not approved and rounds < 5:
-     reviewer: call `agent --print "Review code: $(git diff)"`
+     reviewer: call `workflow review-code <task-id>`
+       (internally runs: agent --print --trust --model $WORKFLOW_AGENT_MODEL)
      if APPROVE:
        break
      else:
@@ -184,46 +186,39 @@ All intermediate steps automated, only final commit requires user.
 5. **Present final result** to user for commit
 
 ### When YOU are Reviewer (for Cursor's work)
-- **Call Cursor Agent** using:
-  ```bash
-  agent --print --mode=ask "Review this proposal/code: <content>"
-  ```
+- **Use the `workflow` CLI** or call agent directly
 - **Parse the response** and extract concerns/approvals
 - **Don't proceed** until concerns are addressed
 
 ### Calling Other Agent
 
-**For Proposal Review:**
+**Option 1: Use the CLI (recommended):**
 ```bash
-response=$(agent --print --mode=ask "You are reviewing a technical proposal from <executor>.
+workflow review-proposal <task-id>    # auto-calls agent
+workflow review-code <task-id>        # auto-calls agent
+```
 
-Task: <task-name>
+**Option 2: Call agent directly:**
+```bash
+response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex "你正在 review 一份技术方案。
 
-Proposal:
+任务: <task-name>
+
+方案内容:
 <full proposal content>
 
-Please review and respond with:
-- APPROVE if the proposal is sound
-- CONCERNS: <numbered list> if you have issues
+请 review 并回复:
+- APPROVE: 如果方案合理可行
+- CONCERNS: <编号列表> 如果有问题
 
-Focus on: architecture, feasibility, edge cases, security.")
+重点: 架构合理性、可行性、边界情况、安全性。请用中文简洁回复。")
 ```
 
-**For Code Review:**
-```bash
-response=$(agent --print --mode=ask "You are reviewing code from <executor>.
-
-Task: <task-name>
-
-Changes:
-$(git diff)
-
-Please review and respond with:
-- APPROVE if the code is good
-- CONCERNS: <numbered list> if you find issues
-
-Focus on: correctness, security, performance, best practices.")
-```
+**Important notes on calling agent:**
+- Always unset `HTTP_PROXY` and `HTTPS_PROXY` to avoid proxy issues
+- Use `--trust` for non-interactive (headless) mode
+- Use `--model gpt-5.3-codex` (configurable via `WORKFLOW_AGENT_MODEL`)
+- Agent model can be changed via env var: `export WORKFLOW_AGENT_MODEL=sonnet-4`
 
 ### Communication Protocol
 - All artifacts in `.workflow/plans/<task-id>/`
