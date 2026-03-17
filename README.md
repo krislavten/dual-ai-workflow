@@ -172,10 +172,13 @@ git commit && git push
 
 ## 命令列表
 
+### 任务管理
 - `workflow init` - 在项目中初始化工作流
 - `workflow create <name> [executor]` - 创建新任务
 - `workflow list` - 列出所有任务
 - `workflow status <task-id>` - 查看任务状态
+
+### 方案与实现
 - `workflow propose <task-id>` - 执行者编写方案
 - `workflow review-proposal <task-id>` - 观察者 review 方案
 - `workflow approve-proposal <task-id>` - 批准方案
@@ -183,9 +186,59 @@ git commit && git push
 - `workflow review-code <task-id>` - 观察者 review 代码
 - `workflow approve <task-id>` - 最终批准
 
+### GitHub Issue 集成
+- `workflow issue-poll` - 扫描带 `claude-ok` 标签的可认领 issue
+- `workflow issue-claim <number>` - 认领 issue（更新看板 + 发 comment）
+- `workflow issue-comment <number> <body>` - 在 issue 上发 comment（支持 `@file.md`）
+- `workflow issue-read <number> [count]` - 读取 issue 最近 comments
+- `workflow issue-wait-reply <number>` - 轮询等待 issue 新回复
+- `workflow issue-done <number> [pr_url]` - 标记完成（状态 → Reviewing）
+- `workflow issue-status <number> <status>` - 更新 issue 看板状态
+
+## 三种工作模式
+
+### 方式 1: Skill — 本地对话式
+
+```
+/workflow 重构用户认证系统 claude
+/workflow-yolo 修复登录重定向bug cursor
+```
+
+### 方式 2: Issue 驱动 — GitHub 异步协作
+
+```
+/workflow-issue          # 轮询可认领的 issue
+/workflow-issue 106      # 处理指定 issue
+```
+
+Issue 驱动模式下，讨论通过 Issue Comment 进行，Claude 和用户通过 comment 相互唤起：
+1. Claude 认领 issue，发 comment 提问/提方案
+2. 用户在 issue 下回复
+3. Claude 检测到新回复，继续推进
+4. 实现完成后创建 PR，状态流转到 Reviewing
+
+### 方式 3: 命令行 — 手动控制每一步
+
+```bash
+workflow create "refactor-auth-system" claude
+workflow propose <task-id>
+workflow review-proposal <task-id>
+# ...
+```
+
 ## 示例场景
 
-### 场景 1: 大型重构 (Claude 执行)
+### 场景 1: Issue 驱动 (推荐)
+
+```bash
+# 在 GitHub 上给 issue 打上 claude-ok 标签，设状态为 Planning
+# 然后在 Claude Code 中：
+/workflow-issue 106
+
+# Claude 自动：认领 → comment 讨论 → 实现 → Cursor review → 提 PR
+```
+
+### 场景 2: 大型重构 (Claude 执行)
 
 ```bash
 workflow create "refactor-api-layer" claude
@@ -193,7 +246,7 @@ workflow create "refactor-api-layer" claude
 # Cursor Agent 作为观察者提供代码层面的审查
 ```
 
-### 场景 2: 修复 Bug (Cursor 执行)
+### 场景 3: 修复 Bug (Cursor 执行)
 
 ```bash
 workflow create "fix-memory-leak" cursor
@@ -203,7 +256,15 @@ workflow create "fix-memory-leak" cursor
 
 ## 配置
 
-可以在项目的 `.workflow/config.json` 中自定义配置（TODO）
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `WORKFLOW_AGENT_MODEL` | `gpt-5.3-codex` | Cursor Agent 使用的模型 |
+| `WORKFLOW_POLL_INTERVAL` | `30` | issue 轮询间隔（秒） |
+| `WORKFLOW_ISSUE_LABEL` | `claude-ok` | issue 筛选标签 |
+| `WORKFLOW_PROJECT_NUMBER` | `3` | GitHub Project 编号 |
+| `WORKFLOW_PROJECT_OWNER` | `kanyun-inc` | Project 所属组织 |
 
 ## License
 

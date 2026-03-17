@@ -18,6 +18,12 @@ AGENT_MODEL="${WORKFLOW_AGENT_MODEL:-gpt-5.3-codex}"
 MAX_REVIEW_ROUNDS=5
 AGENT_TIMEOUT=120
 
+# GitHub Issue 配置
+ISSUE_POLL_INTERVAL="${WORKFLOW_POLL_INTERVAL:-30}"
+ISSUE_LABEL="${WORKFLOW_ISSUE_LABEL:-claude-ok}"
+ISSUE_PROJECT_NUMBER="${WORKFLOW_PROJECT_NUMBER:-3}"
+ISSUE_PROJECT_OWNER="${WORKFLOW_PROJECT_OWNER:-kanyun-inc}"
+
 # ─── 依赖检查 ───────────────────────────────────────────────
 
 check_deps() {
@@ -558,6 +564,442 @@ approve_final() {
     echo "  git push"
 }
 
+# ─── GitHub Issue 工具函数 ─────────────────────────────────────
+
+# 从 git remote 获取 owner/repo
+detect_repo() {
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null) || {
+        echo -e "${RED}错误: 无法获取 git remote origin${NC}" >&2
+        return 1
+    }
+    # 支持 SSH 和 HTTPS 格式
+    echo "$remote_url" | sed -E 's|.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$|\1|'
+}
+
+# 获取 issue 的 project item ID（用于更新看板状态）
+get_project_item_id() {
+    local issue_number="$1"
+    local repo
+    repo=$(detect_repo)
+
+    gh api graphql -f query='
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          projectItems(first: 10) {
+            nodes {
+              id
+              project { number }
+            }
+          }
+        }
+      }
+    }' -f owner="${ISSUE_PROJECT_OWNER}" -f repo="${repo##*/}" -F number="$issue_number" \
+        --jq ".data.repository.issue.projectItems.nodes[] | select(.project.number == ${ISSUE_PROJECT_NUMBER}) | .id" 2>/dev/null
+}
+
+# 更新 issue 在 project board 上的状态
+update_project_status() {
+    local issue_number="$1"
+    local target_status="$2"
+
+    local item_id
+    item_id=$(get_project_item_id "$issue_number")
+    if [[ -z "$item_id" ]]; then
+        echo -e "${YELLOW}⚠ 未找到 issue #${issue_number} 在 project 中的条目，跳过状态更新${NC}" >&2
+        return 1
+    fi
+
+    # 获取 project ID 和 Status 字段 ID
+    local project_data
+    project_data=$(gh api graphql -f query='
+    query($owner: String!, $number: Int!) {
+      organization(login: $owner) {
+        projectV2(number: $number) {
+          id
+          field(name: "Status") {
+            ... on ProjectV2SingleSelectField {
+              id
+              options { id name }
+            }
+          }
+        }
+      }
+    }' -f owner="${ISSUE_PROJECT_OWNER}" -F number="${ISSUE_PROJECT_NUMBER}" 2>/dev/null)
+
+    local project_id
+    project_id=$(echo "$project_data" | jq -r '.data.organization.projectV2.id')
+    local field_id
+    field_id=$(echo "$project_data" | jq -r '.data.organization.projectV2.field.id')
+    local option_id
+    option_id=$(echo "$project_data" | jq -r --arg status "$target_status" \
+        '.data.organization.projectV2.field.options[] | select(.name == $status) | .id')
+
+    if [[ -z "$project_id" || -z "$field_id" || -z "$option_id" ]]; then
+        echo -e "${YELLOW}⚠ 无法解析 project 字段信息，跳过状态更新${NC}" >&2
+        return 1
+    fi
+
+    gh api graphql -f query='
+    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: { singleSelectOptionId: $optionId }
+      }) {
+        projectV2Item { id }
+      }
+    }' -f projectId="$project_id" -f itemId="$item_id" -f fieldId="$field_id" -f optionId="$option_id" \
+        >/dev/null 2>&1
+
+    if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}✓ Issue #${issue_number} 状态已更新为: ${target_status}${NC}"
+    else
+        echo -e "${YELLOW}⚠ 状态更新失败${NC}" >&2
+        return 1
+    fi
+}
+
+# ─── Issue 轮询 ──────────────────────────────────────────────
+
+issue_poll() {
+    local repo
+    repo=$(detect_repo) || return 1
+
+    echo -e "${BLUE}=== 扫描可认领的 Issue ===${NC}"
+    echo -e "${DIM}仓库: ${repo}  标签: ${ISSUE_LABEL}${NC}"
+    echo ""
+
+    local issues
+    issues=$(gh issue list --repo "$repo" --label "${ISSUE_LABEL}" --state open \
+        --json number,title,labels,assignees,body 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}错误: 无法获取 issues${NC}"
+        echo "$issues"
+        return 1
+    fi
+
+    local count
+    count=$(echo "$issues" | jq 'length')
+
+    if [[ "$count" -eq 0 ]]; then
+        echo "没有找到带 '${ISSUE_LABEL}' 标签的 open issue。"
+        return 0
+    fi
+
+    echo -e "${GREEN}找到 ${count} 个候选 issue:${NC}"
+    echo ""
+
+    echo "$issues" | jq -r '.[] | "  #\(.number) \(.title)\n    labels: \([.labels[].name] | join(", "))\n    assignees: \(if .assignees | length > 0 then [.assignees[].login] | join(", ") else "none" end)\n"'
+}
+
+# ─── Issue 认领 ──────────────────────────────────────────────
+
+issue_claim() {
+    local issue_number="${1:-}"
+    if [[ -z "$issue_number" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号${NC}"
+        echo "用法: workflow issue-claim <number>"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    echo -e "${BLUE}=== 认领 Issue #${issue_number} ===${NC}"
+
+    # 检查 issue 是否存在且有 claude-ok label
+    local issue_data
+    issue_data=$(gh issue view "$issue_number" --repo "$repo" \
+        --json number,title,labels,assignees,body,state 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}错误: 无法获取 issue #${issue_number}${NC}"
+        echo "$issue_data"
+        return 1
+    fi
+
+    local title
+    title=$(echo "$issue_data" | jq -r '.title')
+    local has_label
+    has_label=$(echo "$issue_data" | jq -r --arg label "${ISSUE_LABEL}" \
+        '[.labels[].name] | any(. == $label)')
+
+    if [[ "$has_label" != "true" ]]; then
+        echo -e "${YELLOW}⚠ Issue #${issue_number} 没有 '${ISSUE_LABEL}' 标签${NC}"
+        echo "继续认领？(y/n)"
+        read -rp "> " confirm
+        [[ "$confirm" != "y" ]] && return 0
+    fi
+
+    # 更新 project board 状态为 In progress
+    echo -e "${DIM}更新看板状态...${NC}"
+    update_project_status "$issue_number" "In progress"
+
+    # 检测模式
+    local is_yolo
+    is_yolo=$(echo "$issue_data" | jq -r '[.labels[].name] | any(. == "yolo")')
+    local mode="normal"
+    [[ "$is_yolo" == "true" ]] && mode="yolo"
+
+    # 发布认领 comment
+    local claim_body="🤖 **Claude Code 已认领此任务**
+
+- 模式: $([ "$mode" = "yolo" ] && echo "🚀 YOLO (全自动)" || echo "👥 Normal (协作式)")
+- 开始时间: $(date '+%Y-%m-%d %H:%M')
+
+正在分析 issue 内容..."
+
+    local comment_url
+    comment_url=$(gh issue comment "$issue_number" --repo "$repo" --body "$claim_body" 2>&1)
+
+    if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}✓ 已认领 Issue #${issue_number}: ${title}${NC}"
+        echo -e "${YELLOW}模式: ${mode}${NC}"
+    else
+        echo -e "${RED}认领 comment 发布失败${NC}"
+        echo "$comment_url"
+        return 1
+    fi
+
+    # 创建本地 workflow 任务
+    if [[ ! -d "${PLANS_DIR}" ]]; then
+        init_workflow
+    fi
+
+    local task_name
+    task_name=$(echo "$title" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | cut -c1-50)
+    local task_id
+    task_id="$(date +%Y%m%d-%H%M%S)-issue-${issue_number}"
+    local task_dir="${PLANS_DIR}/${task_id}"
+
+    mkdir -p "${task_dir}"
+
+    local body
+    body=$(echo "$issue_data" | jq -r '.body')
+
+    jq -n \
+        --arg id "$task_id" \
+        --arg name "$task_name" \
+        --arg ts "$(date -Iseconds)" \
+        --arg mode "$mode" \
+        --argjson issue_number "$issue_number" \
+        --arg repo "$repo" \
+        '{
+            task_id: $id,
+            task_name: $name,
+            executor: "claude",
+            reviewer: "cursor",
+            mode: $mode,
+            status: "proposal",
+            issue_number: $issue_number,
+            repo: $repo,
+            created_at: $ts,
+            steps: {
+                proposal: "pending",
+                proposal_review: "pending",
+                implementation: "pending",
+                code_review: "pending",
+                approved: "pending"
+            }
+        }' > "${task_dir}/meta.json"
+
+    # 保存 issue 内容为 task.md
+    cat > "${task_dir}/task.md" <<EOF
+# Issue #${issue_number}: ${title}
+
+${body}
+
+---
+**执行者**: claude
+**观察者**: cursor
+**模式**: ${mode}
+**Issue**: https://github.com/${repo}/issues/${issue_number}
+EOF
+
+    echo ""
+    echo -e "${GREEN}本地任务已创建: ${task_id}${NC}"
+    echo -e "${BLUE}任务目录: ${task_dir}${NC}"
+    echo ""
+    echo "下一步:"
+    if [[ "$mode" == "yolo" ]]; then
+        echo "  YOLO 模式 — 直接开始方案和实现"
+    else
+        echo "  Normal 模式 — 在 issue comment 中与用户讨论方案"
+        echo "  workflow issue-comment ${issue_number} \"你的 comment 内容\""
+        echo "  workflow issue-read ${issue_number}  # 读取最新 comments"
+    fi
+}
+
+# ─── Issue Comment 操作 ──────────────────────────────────────
+
+issue_comment() {
+    local issue_number="${1:-}"
+    local body="${2:-}"
+
+    if [[ -z "$issue_number" || -z "$body" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号和 comment 内容${NC}"
+        echo "用法: workflow issue-comment <number> <body>"
+        echo "  或:  workflow issue-comment <number> @file.md  (从文件读取)"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    # 支持从文件读取 comment 内容
+    if [[ "$body" == @* ]]; then
+        local file="${body:1}"
+        if [[ ! -f "$file" ]]; then
+            echo -e "${RED}错误: 文件不存在: ${file}${NC}"
+            return 1
+        fi
+        body=$(cat "$file")
+    fi
+
+    local result
+    result=$(gh issue comment "$issue_number" --repo "$repo" --body "$body" 2>&1)
+
+    if [[ $? -eq 0 ]]; then
+        # 提取 comment URL
+        local comment_url
+        comment_url=$(echo "$result" | grep -oE 'https://github.com/[^ ]+' | head -1)
+        echo -e "${GREEN}✓ Comment 已发布到 Issue #${issue_number}${NC}"
+        if [[ -n "$comment_url" ]]; then
+            echo -e "${BLUE}${comment_url}${NC}"
+        fi
+    else
+        echo -e "${RED}Comment 发布失败${NC}"
+        echo "$result"
+        return 1
+    fi
+}
+
+# ─── 读取 Issue Comments ─────────────────────────────────────
+
+issue_read() {
+    local issue_number="${1:-}"
+    local count="${2:-5}"
+
+    if [[ -z "$issue_number" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号${NC}"
+        echo "用法: workflow issue-read <number> [count]"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    echo -e "${BLUE}=== Issue #${issue_number} Comments (最近 ${count} 条) ===${NC}"
+    echo ""
+
+    local comments
+    comments=$(gh issue view "$issue_number" --repo "$repo" --json comments \
+        --jq ".comments | .[-${count}:]" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}错误: 无法读取 comments${NC}"
+        echo "$comments"
+        return 1
+    fi
+
+    local len
+    len=$(echo "$comments" | jq 'length')
+
+    if [[ "$len" -eq 0 ]]; then
+        echo "暂无 comments。"
+        return 0
+    fi
+
+    echo "$comments" | jq -r '.[] | "── \(.author.login) (\(.createdAt | split("T")[0])) ──\n\(.body)\n"'
+}
+
+# ─── 等待 Issue 回复 ─────────────────────────────────────────
+
+issue_wait_reply() {
+    local issue_number="${1:-}"
+    local since_comment_count="${2:-}"
+
+    if [[ -z "$issue_number" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号${NC}"
+        echo "用法: workflow issue-wait-reply <number> [since_comment_count]"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    # 记录当前 comment 数量
+    if [[ -z "$since_comment_count" ]]; then
+        since_comment_count=$(gh issue view "$issue_number" --repo "$repo" \
+            --json comments --jq '.comments | length' 2>/dev/null)
+    fi
+
+    echo -e "${BLUE}等待 Issue #${issue_number} 的新回复...${NC}"
+    echo -e "${DIM}当前 comment 数: ${since_comment_count}，每 ${ISSUE_POLL_INTERVAL}s 检查一次${NC}"
+    echo ""
+
+    local elapsed=0
+    local max_wait=600  # 10 分钟
+
+    while [[ $elapsed -lt $max_wait ]]; do
+        sleep "${ISSUE_POLL_INTERVAL}"
+        elapsed=$((elapsed + ISSUE_POLL_INTERVAL))
+
+        local current_count
+        current_count=$(gh issue view "$issue_number" --repo "$repo" \
+            --json comments --jq '.comments | length' 2>/dev/null)
+
+        if [[ "$current_count" -gt "$since_comment_count" ]]; then
+            echo -e "${GREEN}✓ 收到新回复！${NC}"
+            echo ""
+
+            # 获取新增的 comments
+            local new_count=$((current_count - since_comment_count))
+            gh issue view "$issue_number" --repo "$repo" --json comments \
+                --jq ".comments | .[-${new_count}:][] | \"── \\(.author.login) ──\\n\\(.body)\\n\""
+
+            return 0
+        fi
+
+        echo -e "${DIM}  [${elapsed}s] 暂无新回复...${NC}"
+    done
+
+    echo -e "${YELLOW}⚠ 等待 ${max_wait}s 后仍无回复${NC}"
+    return 1
+}
+
+# ─── Issue 完成 — 更新状态到 Reviewing ────────────────────────
+
+issue_done() {
+    local issue_number="${1:-}"
+    local pr_url="${2:-}"
+
+    if [[ -z "$issue_number" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号${NC}"
+        echo "用法: workflow issue-done <number> [pr_url]"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    # 更新看板状态
+    update_project_status "$issue_number" "Reviewing"
+
+    # 发布完成 comment
+    local done_body="🔗 **PR 已创建**: ${pr_url:-"(手动创建)"}
+
+任务已移至 **Reviewing** 状态，请 review。"
+
+    gh issue comment "$issue_number" --repo "$repo" --body "$done_body" >/dev/null 2>&1
+
+    echo -e "${GREEN}✓ Issue #${issue_number} 已移至 Reviewing${NC}"
+}
+
 # ─── 列出任务 ────────────────────────────────────────────────
 
 list_tasks() {
@@ -677,6 +1119,13 @@ main() {
         list)                list_tasks ;;
         status)              show_status "$@" ;;
         verify)              verify ;;
+        issue-poll)          issue_poll "$@" ;;
+        issue-claim)         issue_claim "$@" ;;
+        issue-comment)       issue_comment "$@" ;;
+        issue-read)          issue_read "$@" ;;
+        issue-wait-reply)    issue_wait_reply "$@" ;;
+        issue-done)          issue_done "$@" ;;
+        issue-status)        update_project_status "$@" ;;
         help|--help|-h)
             cat <<EOF
 ${BLUE}Dual AI Workflow${NC} - 双 AI 协作工作流
@@ -702,13 +1151,30 @@ ${YELLOW}实现阶段:${NC}
   ${GREEN}auto-review-code${NC} <task-id>    自动 review 循环 (Skill 模式下最多 ${MAX_REVIEW_ROUNDS} 轮，CLI 下单轮)
   ${GREEN}approve${NC} <task-id>             最终批准
 
+${YELLOW}GitHub Issue 集成:${NC}
+  ${GREEN}issue-poll${NC}                    扫描带 ${ISSUE_LABEL} 标签的可认领 issue
+  ${GREEN}issue-claim${NC} <number>          认领 issue (更新看板状态 + 发布 comment)
+  ${GREEN}issue-comment${NC} <number> <body> 在 issue 上发布 comment (支持 @file.md)
+  ${GREEN}issue-read${NC} <number> [count]   读取 issue 最近的 comments (默认 5 条)
+  ${GREEN}issue-wait-reply${NC} <number>     轮询等待 issue 新回复 (每 ${ISSUE_POLL_INTERVAL}s，最多 10min)
+  ${GREEN}issue-done${NC} <number> [pr_url]  标记完成 (状态 → Reviewing + 发布 comment)
+  ${GREEN}issue-status${NC} <number> <status> 更新 issue 看板状态 (Backlog/Planning/In progress/Reviewing/Done)
+
 ${YELLOW}环境变量:${NC}
-  WORKFLOW_AGENT_MODEL  agent 使用的模型 (默认: ${AGENT_MODEL})
+  WORKFLOW_AGENT_MODEL    agent 使用的模型 (默认: ${AGENT_MODEL})
+  WORKFLOW_POLL_INTERVAL  issue 轮询间隔秒数 (默认: ${ISSUE_POLL_INTERVAL})
+  WORKFLOW_ISSUE_LABEL    issue 筛选标签 (默认: ${ISSUE_LABEL})
+  WORKFLOW_PROJECT_NUMBER project 编号 (默认: ${ISSUE_PROJECT_NUMBER})
+  WORKFLOW_PROJECT_OWNER  project 所属组织 (默认: ${ISSUE_PROJECT_OWNER})
 
 ${YELLOW}示例:${NC}
   workflow verify                           # 检查环境
   workflow create "refactor-auth" claude     # 创建任务
   workflow review-proposal <task-id>        # 自动 review
+  workflow issue-poll                       # 扫描可认领 issue
+  workflow issue-claim 106                  # 认领 issue #106
+  workflow issue-comment 106 "方案 LGTM"   # 发布 comment
+  workflow issue-read 106                   # 读取最近 comments
 
 EOF
             ;;
