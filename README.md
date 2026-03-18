@@ -11,10 +11,12 @@
 /plugin marketplace add krislavten/dual-ai-workflow
 /plugin install sparring@sparring
 
-# 2. 初始化（自动装依赖、选模型）
+# 2. 重启会话（输入 /exit 后重新打开 claude）
+
+# 3. 初始化（自动装依赖、选模型）
 /sparring:setup
 
-# 3. 开始用
+# 4. 开始用
 /sparring:workflow 给登录接口加 rate limiting
 ```
 

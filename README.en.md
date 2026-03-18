@@ -21,7 +21,7 @@ The result: more reliable AI output, less manual review, lower cognitive load.
 /plugin install sparring@sparring
 ```
 
-Then run `/sparring:setup` to install dependencies and configure the reviewer model.
+Restart your session (`/exit`, then reopen `claude`), then run `/sparring:setup` to install dependencies and configure the reviewer model.
 
 ## Commands
 
