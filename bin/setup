@@ -64,52 +64,133 @@ prompt_yn() {
     fi
 }
 
-# ─── Step 1: 检测依赖 ────────────────────────────────────────
+# ─── Step 1: 检测并安装依赖 ──────────────────────────────────
+
+ensure_brew() {
+    if command -v brew &>/dev/null; then
+        return 0
+    fi
+
+    echo -e "  ${YELLOW}Homebrew 未安装，正在安装...${NC}"
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+    # Apple Silicon 路径
+    if [[ -f /opt/homebrew/bin/brew ]]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    fi
+
+    if ! command -v brew &>/dev/null; then
+        echo -e "${RED}Homebrew 安装失败，请手动安装后重试${NC}"
+        exit 1
+    fi
+    echo -e "  ${GREEN}Homebrew 安装成功${NC}"
+}
+
+brew_install() {
+    local name="$1"
+    local formula="${2:-$name}"
+    echo -e "  ${YELLOW}正在安装 ${name}...${NC}"
+    brew install "$formula"
+    if command -v "$name" &>/dev/null; then
+        echo -e "  ${GREEN}${name} 安装成功${NC}"
+    else
+        echo -e "${RED}${name} 安装失败${NC}"
+        return 1
+    fi
+}
 
 check_dependencies() {
-    print_step 1 5 "检测依赖"
+    print_step 1 5 "检测并安装依赖"
 
-    local all_ok=true
+    local need_brew=false
 
-    # jq
+    # 检查哪些需要装
     echo -n "  jq: "
     if command -v jq &>/dev/null; then
         echo -e "${GREEN}$(jq --version)${NC}"
     else
-        echo -e "${RED}未安装${NC}"
-        echo -e "    ${DIM}brew install jq${NC}"
-        all_ok=false
+        echo -e "${YELLOW}未安装${NC}"
+        need_brew=true
     fi
 
-    # gh
     echo -n "  gh (GitHub CLI): "
     if command -v gh &>/dev/null; then
         echo -e "${GREEN}$(gh --version | head -1)${NC}"
     else
-        echo -e "${YELLOW}未安装（Issue 驱动模式需要）${NC}"
-        echo -e "    ${DIM}brew install gh${NC}"
+        echo -e "${YELLOW}未安装${NC}"
+        need_brew=true
     fi
 
-    # agent (Cursor CLI)
     echo -n "  agent (Cursor CLI): "
     if command -v agent &>/dev/null; then
         local agent_ver
         agent_ver=$(agent --version 2>/dev/null || echo "installed")
         echo -e "${GREEN}${agent_ver}${NC}"
     else
-        echo -e "${RED}未安装${NC}"
-        echo ""
-        echo -e "  Cursor Agent CLI 是核心依赖，必须安装。"
-        echo -e "  安装方式："
-        echo -e "    ${DIM}1. 打开 Cursor 编辑器${NC}"
-        echo -e "    ${DIM}2. Cmd+Shift+P → 'Install agent command'${NC}"
-        echo -e "    ${DIM}3. 或访问 https://docs.cursor.com/cli${NC}"
-        all_ok=false
+        echo -e "${YELLOW}未安装${NC}"
     fi
 
-    if [[ "$all_ok" == false ]]; then
+    # 安装缺失的 brew 依赖
+    if [[ "$need_brew" == true ]]; then
         echo ""
-        echo -e "${RED}请先安装缺失的依赖，然后重新运行 setup。${NC}"
+        ensure_brew
+
+        if ! command -v jq &>/dev/null; then
+            brew_install jq
+        fi
+
+        if ! command -v gh &>/dev/null; then
+            brew_install gh
+            echo ""
+            echo -e "  ${YELLOW}gh 需要登录 GitHub:${NC}"
+            echo -e "    ${DIM}gh auth login${NC}"
+            if prompt_yn "  现在登录？" "y"; then
+                gh auth login || true
+            fi
+        fi
+    fi
+
+    # agent CLI 需要特殊处理（不在 brew 里）
+    if ! command -v agent &>/dev/null; then
+        echo ""
+        echo -e "  ${YELLOW}Cursor Agent CLI 需要通过 npm 安装:${NC}"
+        echo ""
+
+        if command -v npm &>/dev/null; then
+            if prompt_yn "  自动安装 @anthropic-ai/cursor-agent？" "y"; then
+                npm install -g @anthropic-ai/cursor-agent 2>/dev/null && {
+                    echo -e "  ${GREEN}agent CLI 安装成功${NC}"
+                } || {
+                    echo -e "  ${YELLOW}npm 安装失败，尝试其他方式...${NC}"
+                }
+            fi
+        fi
+
+        # 如果 npm 安装失败或用户拒绝，给手动指引
+        if ! command -v agent &>/dev/null; then
+            echo ""
+            echo -e "  请手动安装 Cursor Agent CLI:"
+            echo -e "    ${DIM}方式 1: 打开 Cursor → Cmd+Shift+P → 'Install agent command'${NC}"
+            echo -e "    ${DIM}方式 2: npm install -g @anthropic-ai/cursor-agent${NC}"
+            echo ""
+            if ! prompt_yn "  已安装完成？继续 setup？" "n"; then
+                echo -e "${RED}请安装 agent CLI 后重新运行 ./bin/setup${NC}"
+                exit 1
+            fi
+        fi
+    fi
+
+    # 最终检查必要依赖
+    echo ""
+    local ok=true
+    echo -n "  最终检查 — jq: "
+    if command -v jq &>/dev/null; then echo -e "${GREEN}OK${NC}"; else echo -e "${RED}缺失${NC}"; ok=false; fi
+    echo -n "  最终检查 — agent: "
+    if command -v agent &>/dev/null; then echo -e "${GREEN}OK${NC}"; else echo -e "${RED}缺失${NC}"; ok=false; fi
+
+    if [[ "$ok" == false ]]; then
+        echo ""
+        echo -e "${RED}核心依赖缺失，无法继续。${NC}"
         exit 1
     fi
 }
