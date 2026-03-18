@@ -52,21 +52,31 @@
 
 ## 安装
 
+### 方式 1: Claude Code Plugin（推荐）
+
+在 Claude Code 中运行：
+
+```
+/install github:krislavten/dual-ai-workflow
+```
+
+然后运行 `/setup` 完成交互式配置。
+
+### 方式 2: 手动安装
+
 ```bash
 git clone git@github.com:krislavten/dual-ai-workflow.git ~/develop/dual-ai-workflow
 cd ~/develop/dual-ai-workflow
 ./bin/setup
 ```
 
-交互式引导你完成：
-1. 检测依赖（jq、gh、Cursor Agent CLI）
+`/setup` 和 `./bin/setup` 都会引导你完成：
+1. 安装依赖（Homebrew、jq、gh、Cursor Agent CLI）
 2. 选择 Cursor Agent 模型（xhigh / high / standard / opus）
 3. 配置 Issue 驱动模式（可选）
-4. 安装 `workflow` 命令 + Claude Code `/workflow` skill
+4. 安装 `workflow` 命令
 5. 生成 `agents/cursor.md` 配置
 6. 验证环境
-
-安装完成后可随时用 `workflow setup` 重新配置。
 
 ## 使用方式
 
