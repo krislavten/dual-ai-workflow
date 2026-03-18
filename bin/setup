@@ -1,0 +1,360 @@
+#!/bin/bash
+
+# Dual AI Workflow - 交互式初始化设置
+# 帮助用户快速配置双 AI 协作环境
+
+set -euo pipefail
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+AGENTS_DIR="${PROJECT_DIR}/agents"
+
+# ─── 工具函数 ────────────────────────────────────────────────
+
+print_header() {
+    echo ""
+    echo -e "${BOLD}${BLUE}═══════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${BLUE}  Dual AI Workflow Setup${NC}"
+    echo -e "${BOLD}${BLUE}═══════════════════════════════════════════${NC}"
+    echo ""
+}
+
+print_step() {
+    local step="$1"
+    local total="$2"
+    local desc="$3"
+    echo ""
+    echo -e "${BOLD}[${step}/${total}] ${desc}${NC}"
+    echo -e "${DIM}───────────────────────────────────────────${NC}"
+}
+
+prompt_choice() {
+    local prompt="$1"
+    local default="$2"
+    local result
+
+    if [[ -n "$default" ]]; then
+        read -rp "$(echo -e "${YELLOW}${prompt} [${default}]: ${NC}")" result
+        echo "${result:-$default}"
+    else
+        read -rp "$(echo -e "${YELLOW}${prompt}: ${NC}")" result
+        echo "$result"
+    fi
+}
+
+prompt_yn() {
+    local prompt="$1"
+    local default="${2:-y}"
+    local result
+
+    if [[ "$default" == "y" ]]; then
+        read -rp "$(echo -e "${YELLOW}${prompt} [Y/n]: ${NC}")" result
+        [[ -z "$result" || "$result" =~ ^[Yy] ]]
+    else
+        read -rp "$(echo -e "${YELLOW}${prompt} [y/N]: ${NC}")" result
+        [[ "$result" =~ ^[Yy] ]]
+    fi
+}
+
+# ─── Step 1: 检测依赖 ────────────────────────────────────────
+
+check_dependencies() {
+    print_step 1 5 "检测依赖"
+
+    local all_ok=true
+
+    # jq
+    echo -n "  jq: "
+    if command -v jq &>/dev/null; then
+        echo -e "${GREEN}$(jq --version)${NC}"
+    else
+        echo -e "${RED}未安装${NC}"
+        echo -e "    ${DIM}brew install jq${NC}"
+        all_ok=false
+    fi
+
+    # gh
+    echo -n "  gh (GitHub CLI): "
+    if command -v gh &>/dev/null; then
+        echo -e "${GREEN}$(gh --version | head -1)${NC}"
+    else
+        echo -e "${YELLOW}未安装（Issue 驱动模式需要）${NC}"
+        echo -e "    ${DIM}brew install gh${NC}"
+    fi
+
+    # agent (Cursor CLI)
+    echo -n "  agent (Cursor CLI): "
+    if command -v agent &>/dev/null; then
+        local agent_ver
+        agent_ver=$(agent --version 2>/dev/null || echo "installed")
+        echo -e "${GREEN}${agent_ver}${NC}"
+    else
+        echo -e "${RED}未安装${NC}"
+        echo ""
+        echo -e "  Cursor Agent CLI 是核心依赖，必须安装。"
+        echo -e "  安装方式："
+        echo -e "    ${DIM}1. 打开 Cursor 编辑器${NC}"
+        echo -e "    ${DIM}2. Cmd+Shift+P → 'Install agent command'${NC}"
+        echo -e "    ${DIM}3. 或访问 https://docs.cursor.com/cli${NC}"
+        all_ok=false
+    fi
+
+    if [[ "$all_ok" == false ]]; then
+        echo ""
+        echo -e "${RED}请先安装缺失的依赖，然后重新运行 setup。${NC}"
+        exit 1
+    fi
+}
+
+# ─── Step 2: 选择模型 ────────────────────────────────────────
+
+select_model() {
+    print_step 2 5 "选择 Cursor Agent 模型"
+
+    echo -e "  模型决定 Cursor Agent review 的质量和速度。"
+    echo -e "  推荐按项目重要性选择：${NC}"
+    echo ""
+    echo -e "    1) ${BOLD}gpt-5.3-codex-xhigh${NC}  — 最高质量，适合重要项目 ${GREEN}(推荐)${NC}"
+    echo -e "    2) gpt-5.3-codex-high   — 高质量，速度稍快"
+    echo -e "    3) gpt-5.3-codex        — 标准质量，最快"
+    echo -e "    4) opus-4.6-thinking    — Claude Opus，适合偏好 Anthropic 模型"
+    echo -e "    5) 自定义               — 手动输入模型名"
+    echo ""
+
+    local choice
+    choice=$(prompt_choice "选择" "1")
+
+    case "$choice" in
+        1) SELECTED_MODEL="gpt-5.3-codex-xhigh" ;;
+        2) SELECTED_MODEL="gpt-5.3-codex-high" ;;
+        3) SELECTED_MODEL="gpt-5.3-codex" ;;
+        4) SELECTED_MODEL="opus-4.6-thinking" ;;
+        5)
+            echo ""
+            echo -e "  ${DIM}可用模型列表:${NC}"
+            HTTP_PROXY= HTTPS_PROXY= agent --list-models 2>&1 | grep -E "^\S" | head -20
+            echo ""
+            SELECTED_MODEL=$(prompt_choice "输入模型名" "gpt-5.3-codex-xhigh")
+            ;;
+        *) SELECTED_MODEL="gpt-5.3-codex-xhigh" ;;
+    esac
+
+    echo ""
+    echo -e "  ${GREEN}已选择: ${SELECTED_MODEL}${NC}"
+}
+
+# ─── Step 3: Issue 驱动配置 ──────────────────────────────────
+
+configure_issue_mode() {
+    print_step 3 5 "配置 Issue 驱动模式（可选）"
+
+    echo -e "  Issue 驱动模式让 Claude 从 GitHub Issue 获取任务，"
+    echo -e "  讨论和进度自动同步到 Issue comment。"
+    echo ""
+
+    if ! prompt_yn "是否配置 Issue 驱动模式？" "n"; then
+        ISSUE_CONFIGURED=false
+        echo -e "  ${DIM}跳过。可以之后通过环境变量配置。${NC}"
+        return
+    fi
+
+    ISSUE_CONFIGURED=true
+    echo ""
+
+    # 检测当前 repo
+    local detected_owner=""
+    local detected_repo=""
+    if git remote get-url origin &>/dev/null; then
+        local remote_url
+        remote_url=$(git remote get-url origin 2>/dev/null)
+        detected_owner=$(echo "$remote_url" | sed -E 's|.*github\.com[:/]([^/]+)/.*|\1|')
+        detected_repo=$(echo "$remote_url" | sed -E 's|.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
+        echo -e "  ${DIM}检测到仓库: ${detected_repo}${NC}"
+    fi
+
+    ISSUE_PROJECT_OWNER=$(prompt_choice "GitHub 组织/用户名" "${detected_owner}")
+    ISSUE_PROJECT_NUMBER=$(prompt_choice "GitHub Project 编号" "")
+    ISSUE_LABEL=$(prompt_choice "Issue 筛选标签" "claude-ok")
+
+    echo ""
+    echo -e "  ${GREEN}Issue 配置:${NC}"
+    echo -e "    组织: ${ISSUE_PROJECT_OWNER}"
+    echo -e "    Project: #${ISSUE_PROJECT_NUMBER}"
+    echo -e "    标签: ${ISSUE_LABEL}"
+}
+
+# ─── Step 4: 生成配置 + 安装 ─────────────────────────────────
+
+install_and_configure() {
+    print_step 4 5 "安装和生成配置"
+
+    # 运行 install.sh 的核心逻辑（不重复执行如果已安装）
+    # 1. workflow 命令
+    if command -v workflow &>/dev/null; then
+        echo -e "  ${GREEN}workflow 命令已在 PATH 中${NC}"
+    else
+        if [[ -d "$HOME/.local/bin" ]]; then
+            ln -sf "${PROJECT_DIR}/bin/workflow" "$HOME/.local/bin/workflow"
+            echo -e "  ${GREEN}已安装 workflow 到 ~/.local/bin/${NC}"
+        elif [[ -d "/usr/local/bin" ]]; then
+            sudo ln -sf "${PROJECT_DIR}/bin/workflow" "/usr/local/bin/workflow"
+            echo -e "  ${GREEN}已安装 workflow 到 /usr/local/bin/${NC}"
+        else
+            echo -e "  ${YELLOW}请手动添加到 PATH: export PATH=\"${PROJECT_DIR}/bin:\$PATH\"${NC}"
+        fi
+    fi
+
+    # 2. Claude Code skill
+    local skills_dir="$HOME/.claude/skills"
+    mkdir -p "${skills_dir}"
+    ln -sf "${PROJECT_DIR}/.skills/workflow" "${skills_dir}/dual-ai-workflow"
+    echo -e "  ${GREEN}已安装 /workflow skill${NC}"
+
+    # 3. 生成 agents/cursor.md
+    mkdir -p "${AGENTS_DIR}"
+    cat > "${AGENTS_DIR}/cursor.md" <<AGENTEOF
+# Cursor Agent Configuration
+
+## Model
+
+model: ${SELECTED_MODEL}
+
+## CLI Options
+
+- \`--print\` — non-interactive mode
+- \`--trust\` — skip workspace trust prompt
+- \`--model\` — set from model above
+
+## System Prompt
+
+你是一个严格的代码审查专家。你的每一个意见都可能决定线上用户的体验。
+
+你在一个双 AI 协作工作流中担任 Reviewer 角色。你的搭档（Claude Code）是执行者，你负责审查他的方案和代码。
+
+### 审查原则
+
+**先理解，再评判。**
+
+- 在给出任何意见之前，你必须通读全部上下文：任务描述、方案全文、代码改动全貌
+- 你要对项目有全面的认识——理解现有架构、约定、依赖关系——然后再决定是否给出意见
+- 不要只看 diff，要理解 diff 在整个项目中的位置和影响
+- 变更越大，你越要谨慎，越要花时间理解全貌后再发言
+
+**不讨好，不鼓励，不客套。**
+
+- 不要说"方案整体不错"、"代码质量很好"之类的废话
+- 不要在 CONCERNS 前面加"总体来说很好，但是..."
+- 你的职责不是让执行者感觉良好，而是找出问题
+- 如果真的没问题，一句 APPROVE 加理由就够了
+
+**找茬心态。**
+
+- 假设代码里有 bug，你的任务是找到它
+- 假设方案有漏洞，你的任务是暴露它
+- 关注：竞态条件、边界情况、安全漏洞、性能退化、错误处理缺失
+- 关注：方案是否过度设计、是否有更简单的替代方案、是否遗漏了关键场景
+- 关注：对现有功能的回归风险，改动是否会破坏不相关的模块
+
+**对变更规模敏感。**
+
+- 改 1 个文件 3 行代码：聚焦正确性
+- 改 5+ 个文件：审查模块间交互、接口一致性
+- 架构级重构：质疑必要性、评估迁移风险、关注向后兼容
+- 新增依赖：质疑是否真的需要、评估维护成本
+
+### 方案审查要点
+
+- 问题分析是否准确？是否抓住了根因？
+- 有没有更简单直接的方案被忽略了？
+- 边界情况和异常场景是否覆盖？
+- 对现有系统的影响评估是否充分？
+- 回滚方案是什么？出了问题怎么办？
+- 测试策略是否能真正验证方案的正确性？
+
+### 代码审查要点
+
+- 代码是否忠实实现了批准的方案？有没有偏离？
+- 有没有 bug、竞态、资源泄漏、注入风险？
+- 错误处理是否完备？失败路径是否被测试覆盖？
+- 测试是否测的是真实场景而不是实现细节？
+- 有没有引入不必要的复杂度？
+- 改动对性能的影响？是否需要基准测试？
+
+### 响应格式
+
+始终用中文回复。
+
+通过时：
+\`\`\`
+APPROVE
+
+[为什么通过，1-2 句话，说清楚你验证了什么]
+\`\`\`
+
+有问题时：
+\`\`\`
+CONCERNS
+
+1. [问题描述 + 影响 + 建议修复方式]
+2. [问题描述 + 影响 + 建议修复方式]
+...
+\`\`\`
+
+APPROVE 和 CONCERNS 二选一，不要混用。
+
+没有把握时宁可提 CONCERNS。放过一个问题的代价远大于多讨论一轮的成本。
+AGENTEOF
+    echo -e "  ${GREEN}已生成 agents/cursor.md (模型: ${SELECTED_MODEL})${NC}"
+
+    # 4. 生成环境变量提示
+    if [[ "${ISSUE_CONFIGURED:-false}" == true ]]; then
+        echo ""
+        echo -e "  ${YELLOW}Issue 驱动模式需要设置环境变量，请添加到 shell 配置:${NC}"
+        echo ""
+        echo -e "    export WORKFLOW_PROJECT_OWNER=\"${ISSUE_PROJECT_OWNER}\""
+        echo -e "    export WORKFLOW_PROJECT_NUMBER=\"${ISSUE_PROJECT_NUMBER}\""
+        echo -e "    export WORKFLOW_ISSUE_LABEL=\"${ISSUE_LABEL}\""
+    fi
+}
+
+# ─── Step 5: 验证 ────────────────────────────────────────────
+
+run_verify() {
+    print_step 5 5 "验证安装"
+
+    HTTP_PROXY= HTTPS_PROXY= bash "${PROJECT_DIR}/bin/workflow" verify 2>&1
+}
+
+# ─── 主流程 ──────────────────────────────────────────────────
+
+main() {
+    print_header
+    check_dependencies
+    select_model
+    configure_issue_mode
+    install_and_configure
+    run_verify
+
+    echo ""
+    echo -e "${BOLD}${GREEN}═══════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${GREEN}  Setup 完成！${NC}"
+    echo -e "${BOLD}${GREEN}═══════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  开始使用："
+    echo -e "    ${BOLD}/workflow${NC} <任务描述> <claude|cursor>   — 普通模式"
+    echo -e "    ${BOLD}/workflow-yolo${NC} <任务描述> <executor>   — 全自动模式"
+    echo -e "    ${BOLD}/workflow-issue${NC}                        — Issue 驱动模式"
+    echo ""
+    echo -e "  更多帮助: ${DIM}workflow help${NC}"
+    echo ""
+}
+
+main "$@"

@@ -1282,6 +1282,7 @@ main() {
     shift 2>/dev/null || true
 
     case "$command" in
+        setup)               exec bash "$(cd "$(dirname "$0")" && pwd)/setup" "$@" ;;
         init)                init_workflow ;;
         create)              create_task "$@" ;;
         propose)             propose "$@" ;;
@@ -1308,12 +1309,15 @@ ${BLUE}Dual AI Workflow${NC} - 双 AI 协作工作流
 
 ${YELLOW}用法:${NC} workflow <command> [options]
 
+${YELLOW}初始化:${NC}
+  ${GREEN}setup${NC}                         交互式初始化 (选择模型、配置 Issue 模式)
+  ${GREEN}verify${NC}                        验证环境 (依赖、agent 连通性)
+
 ${YELLOW}任务管理:${NC}
   ${GREEN}init${NC}                          初始化工作流目录
   ${GREEN}create${NC} <name> <claude|cursor>  创建新任务
   ${GREEN}list${NC}                          列出所有任务
   ${GREEN}status${NC} <task-id>              查看任务状态
-  ${GREEN}verify${NC}                        验证环境 (依赖、agent 连通性)
 
 ${YELLOW}方案阶段:${NC}
   ${GREEN}propose${NC} <task-id>             执行者编写方案
@@ -1337,13 +1341,14 @@ ${YELLOW}GitHub Issue 集成:${NC}
   ${GREEN}issue-status${NC} <number> <status> 更新 issue 看板状态 (Backlog/Planning/In progress/Reviewing/Done)
 
 ${YELLOW}环境变量:${NC}
-  WORKFLOW_AGENT_MODEL    agent 使用的模型 (默认: ${AGENT_MODEL})
+  WORKFLOW_AGENT_MODEL    agent 使用的模型 (读取 agents/cursor.md)
   WORKFLOW_POLL_INTERVAL  issue 轮询间隔秒数 (默认: ${ISSUE_POLL_INTERVAL})
   WORKFLOW_ISSUE_LABEL    issue 筛选标签 (默认: ${ISSUE_LABEL})
   WORKFLOW_PROJECT_NUMBER project 编号 (默认: ${ISSUE_PROJECT_NUMBER})
   WORKFLOW_PROJECT_OWNER  project 所属组织 (默认: ${ISSUE_PROJECT_OWNER})
 
 ${YELLOW}示例:${NC}
+  workflow setup                             # 交互式初始化
   workflow verify                           # 检查环境
   workflow create "refactor-auth" claude     # 创建任务
   workflow review-proposal <task-id>        # 自动 review
