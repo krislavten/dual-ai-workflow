@@ -49,7 +49,7 @@ Commit!
    workflow review-proposal <task-id>
 
    # Option B: Call agent directly
-   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex "Review this proposal: ...")
+   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "Review this proposal: ...")
    if echo "$response" | grep -qi "APPROVE"; then
      # approved
    else
@@ -68,7 +68,7 @@ Commit!
    workflow review-code <task-id>
 
    # Option B: Call agent directly
-   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex "Review this code: $(git diff)")
+   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "Review this code: $(git diff)")
    if echo "$response" | grep -qi "APPROVE"; then
      # approved
    else
@@ -157,6 +157,20 @@ User: yes
 
 Cursor: [commits] Done! 🎉
 ```
+
+## Issue Sync
+
+When a task has `issue_number` in `meta.json`, sync key steps to the Issue:
+
+- **Cursor Agent reviews** are auto-synced by the `workflow` CLI with `🤖` marker
+- **You (Claude/Executor)** must manually sync your actions:
+  ```bash
+  workflow issue-comment <number> "🧠 **[Claude Code — <Phase>]**
+
+  <content>"
+  ```
+- Sync: proposal summary, implementation summary, final result
+- **No `issue_number`?** Skip all sync, work purely locally.
 
 ## Notes
 

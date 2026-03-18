@@ -14,9 +14,9 @@ DIM='\033[2m'
 NC='\033[0m'
 
 # 配置
-AGENT_MODEL="${WORKFLOW_AGENT_MODEL:-gpt-5.3-codex}"
 MAX_REVIEW_ROUNDS=5
 AGENT_TIMEOUT=120
+AGENTS_DIR="${AGENTS_DIR:-$(cd "$(dirname "$0")/.." && pwd)/agents}"
 
 # GitHub Issue 配置
 ISSUE_POLL_INTERVAL="${WORKFLOW_POLL_INTERVAL:-30}"
@@ -114,10 +114,14 @@ validate_task_exists() {
 
 update_meta() {
     local task_dir="$1"
-    local jq_expr="$2"
+    shift
+    # 最后一个参数是 jq 表达式，前面的都是 jq 选项（如 --arg）
+    local args=("$@")
+    local jq_expr="${args[-1]}"
+    local jq_opts=("${args[@]:0:${#args[@]}-1}")
     local tmp="${task_dir}/meta.json.tmp"
 
-    if ! jq "$jq_expr" "${task_dir}/meta.json" > "$tmp"; then
+    if ! jq "${jq_opts[@]}" "$jq_expr" "${task_dir}/meta.json" > "$tmp"; then
         rm -f "$tmp"
         echo -e "${RED}错误: JSON 更新失败${NC}"
         return 1
@@ -125,18 +129,165 @@ update_meta() {
     mv -f "$tmp" "${task_dir}/meta.json"
 }
 
+# ─── Issue 同步 ──────────────────────────────────────────────
+
+# 如果任务关联了 issue，同步 comment（带身份标记）
+# Usage: sync_to_issue <task_dir> <agent_name> <phase_label> <body>
+# Example: sync_to_issue "$task_dir" "Cursor Agent" "Proposal Review" "$review_result"
+sync_to_issue() {
+    local task_dir="$1"
+    local agent_name="$2"
+    local phase_label="$3"
+    local body="$4"
+
+    local issue_number repo
+    issue_number=$(jq -r '.issue_number // empty' "${task_dir}/meta.json")
+    repo=$(jq -r '.repo // empty' "${task_dir}/meta.json")
+
+    [[ -z "$issue_number" || -z "$repo" ]] && return 0
+
+    local icon
+    case "$agent_name" in
+        *Claude*|*claude*) icon="🧠" ;;
+        *Cursor*|*cursor*) icon="🤖" ;;
+        *)                 icon="🔧" ;;
+    esac
+
+    local comment="${icon} **[${agent_name} — ${phase_label}]**
+
+${body}"
+
+    gh issue comment "$issue_number" --repo "$repo" --body "$comment" >/dev/null 2>&1 || {
+        echo -e "${DIM}  (Issue 同步失败，继续本地流程)${NC}" >&2
+    }
+}
+
+# ─── Agent 配置加载 ─────────────────────────────────────────
+
+# 从 agents/<name>.md 读取配置
+# 解析 model 和 system prompt
+load_agent_config() {
+    local agent_name="$1"
+    local config_file="${AGENTS_DIR}/${agent_name}.md"
+
+    AGENT_MODEL=""
+    AGENT_SYSTEM_PROMPT=""
+
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${DIM}  未找到 agent 配置: ${config_file}，使用默认值${NC}" >&2
+        AGENT_MODEL="gpt-5.3-codex"
+        return 0
+    fi
+
+    # 解析 model: 从 "model: xxx" 行提取
+    AGENT_MODEL=$(grep -E '^model:' "$config_file" | head -1 | sed 's/^model:[[:space:]]*//')
+    if [[ -z "$AGENT_MODEL" ]]; then
+        AGENT_MODEL="gpt-5.3-codex"
+    fi
+
+    # 解析 system prompt: ## System Prompt 之后的所有内容
+    local in_prompt=false
+    local prompt_lines=()
+    while IFS= read -r line; do
+        if [[ "$in_prompt" == true ]]; then
+            prompt_lines+=("$line")
+        elif [[ "$line" == "## System Prompt" ]]; then
+            in_prompt=true
+        fi
+    done < "$config_file"
+
+    if [[ ${#prompt_lines[@]} -gt 0 ]]; then
+        AGENT_SYSTEM_PROMPT=$(printf '%s\n' "${prompt_lines[@]}")
+        # 去掉开头的空行
+        AGENT_SYSTEM_PROMPT=$(echo "$AGENT_SYSTEM_PROMPT" | sed '/./,$!d')
+    fi
+}
+
 # ─── Agent 调用封装 ──────────────────────────────────────────
+
+_timeout_cmd() {
+    local duration="$1"
+    shift
+    if command -v timeout &>/dev/null; then
+        timeout "$duration" "$@"
+    elif command -v gtimeout &>/dev/null; then
+        gtimeout "$duration" "$@"
+    else
+        # macOS fallback: use perl
+        perl -e '
+            use POSIX ":sys_wait_h";
+            my $timeout = shift @ARGV;
+            my $pid = fork();
+            if ($pid == 0) { exec @ARGV; exit 1; }
+            eval {
+                local $SIG{ALRM} = sub { kill "TERM", $pid; die "timeout\n"; };
+                alarm $timeout;
+                waitpid($pid, 0);
+                alarm 0;
+            };
+            if ($@ eq "timeout\n") { exit 124; }
+            exit ($? >> 8);
+        ' "$duration" "$@"
+    fi
+}
+
+# 为任务初始化 cursor agent session（创建 chat 并存到 meta.json）
+init_agent_session() {
+    local task_dir="$1"
+
+    check_agent || return 1
+
+    local chat_id
+    chat_id=$(HTTP_PROXY= HTTPS_PROXY= agent create-chat 2>/dev/null)
+
+    if [[ -n "$chat_id" ]]; then
+        update_meta "$task_dir" --arg cid "$chat_id" '.agent_chat_id = $cid'
+        echo -e "${DIM}  已创建 Cursor Agent session: ${chat_id}${NC}" >&2
+    else
+        echo -e "${DIM}  无法创建 agent session，将使用独立会话${NC}" >&2
+    fi
+}
 
 call_agent() {
     local prompt="$1"
+    local task_dir="${2:-}"
     local max_retries=3
     local result=""
 
     check_agent
 
+    # 加载 cursor agent 配置
+    load_agent_config "cursor"
+
+    # 如果有 system prompt，拼到 prompt 前面
+    if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
+        prompt="<system>
+${AGENT_SYSTEM_PROMPT}
+</system>
+
+${prompt}"
+    fi
+
+    # 允许环境变量覆盖
+    local model="${WORKFLOW_AGENT_MODEL:-$AGENT_MODEL}"
+
+    # 读取 chat_id 用于 resume
+    local chat_id=""
+    if [[ -n "$task_dir" && -f "${task_dir}/meta.json" ]]; then
+        chat_id=$(jq -r '.agent_chat_id // empty' "${task_dir}/meta.json")
+    fi
+
+    local resume_args=()
+    if [[ -n "$chat_id" ]]; then
+        resume_args=(--resume "$chat_id")
+        echo -e "${DIM}  使用模型: ${model} | 恢复会话: ${chat_id:0:8}...${NC}" >&2
+    else
+        echo -e "${DIM}  使用模型: ${model} | 新会话${NC}" >&2
+    fi
+
     for i in $(seq 1 $max_retries); do
-        result=$(HTTP_PROXY= HTTPS_PROXY= timeout "${AGENT_TIMEOUT}" \
-            agent --print --trust --model "$AGENT_MODEL" "$prompt" 2>&1) && break
+        result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "${AGENT_TIMEOUT}" \
+            agent --print --trust --model "$model" "${resume_args[@]}" "$prompt" 2>&1) && break
 
         if [[ $i -lt $max_retries ]]; then
             echo -e "${DIM}  agent 调用失败，重试 ($i/$max_retries)...${NC}" >&2
@@ -247,6 +398,9 @@ create_task() {
 **观察者**: ${reviewer}
 EOF
 
+    # 初始化 Cursor Agent session
+    init_agent_session "${task_dir}"
+
     echo -e "${GREEN}✓ 任务创建成功: ${task_id}${NC}"
     echo -e "${BLUE}任务目录: ${task_dir}${NC}"
     echo -e "${YELLOW}执行者: ${executor}  观察者: ${reviewer}${NC}"
@@ -319,7 +473,7 @@ ${proposal_content}
     echo -e "${DIM}正在调用 ${reviewer} agent review...${NC}"
 
     local review_result
-    if review_result=$(call_agent "$prompt"); then
+    if review_result=$(call_agent "$prompt" "$task_dir"); then
         echo "$review_result" > "${task_dir}/proposal-review-${review_num}.md"
         echo ""
         echo -e "${GREEN}Review 结果:${NC}"
@@ -329,9 +483,11 @@ ${proposal_content}
         if echo "$review_result" | grep -qi "APPROVE"; then
             echo -e "${GREEN}✓ 方案 Review 通过！${NC}"
             update_meta "$task_dir" '.steps.proposal_review = "approved"'
+            sync_to_issue "$task_dir" "Cursor Agent" "Proposal Review #${review_num} — APPROVED" "$review_result"
         else
             echo -e "${YELLOW}⚠ 有修改意见，请执行者处理后重新 review${NC}"
             update_meta "$task_dir" '.steps.proposal_review = "needs_revision"'
+            sync_to_issue "$task_dir" "Cursor Agent" "Proposal Review #${review_num} — NEEDS REVISION" "$review_result"
         fi
     else
         echo -e "${YELLOW}⚠ Agent 调用失败，降级为手动 review${NC}"
@@ -359,6 +515,8 @@ approve_proposal() {
     echo -e "${YELLOW}执行者 (${executor}) 可以开始实现代码${NC}"
     echo ""
     echo "下一步: workflow implement ${task_id}"
+
+    sync_to_issue "$task_dir" "Workflow" "Proposal Approved" "方案已批准，进入实现阶段。执行者: **${executor}**"
 }
 
 # ─── 实现代码 ────────────────────────────────────────────────
@@ -430,7 +588,7 @@ ${diff_content}
     echo -e "${DIM}正在调用 ${reviewer} agent review...${NC}"
 
     local review_result
-    if review_result=$(call_agent "$prompt"); then
+    if review_result=$(call_agent "$prompt" "$task_dir"); then
         echo "$review_result" > "${task_dir}/code-review-${review_num}.md"
         echo ""
         echo -e "${GREEN}Code Review 结果:${NC}"
@@ -440,9 +598,11 @@ ${diff_content}
         if echo "$review_result" | grep -qi "APPROVE"; then
             echo -e "${GREEN}✓ 代码 Review 通过！${NC}"
             update_meta "$task_dir" '.steps.code_review = "approved"'
+            sync_to_issue "$task_dir" "Cursor Agent" "Code Review #${review_num} — APPROVED" "$review_result"
         else
             echo -e "${YELLOW}⚠ 有修改意见，请执行者修复后重新 review${NC}"
             update_meta "$task_dir" '.steps.code_review = "needs_revision"'
+            sync_to_issue "$task_dir" "Cursor Agent" "Code Review #${review_num} — NEEDS REVISION" "$review_result"
         fi
     else
         echo -e "${YELLOW}⚠ Agent 调用失败，降级为手动 review${NC}"
@@ -562,6 +722,8 @@ approve_final() {
     echo "  git add ."
     echo "  git commit"
     echo "  git push"
+
+    sync_to_issue "$task_dir" "Workflow" "Task Completed" "任务已完成，所有 review 通过。准备提交代码。"
 }
 
 # ─── GitHub Issue 工具函数 ─────────────────────────────────────
@@ -820,6 +982,9 @@ ${body}
 **Issue**: https://github.com/${repo}/issues/${issue_number}
 EOF
 
+    # 初始化 Cursor Agent session
+    init_agent_session "${task_dir}"
+
     echo ""
     echo -e "${GREEN}本地任务已创建: ${task_id}${NC}"
     echo -e "${BLUE}任务目录: ${task_dir}${NC}"
@@ -1066,8 +1231,19 @@ verify() {
         ok=false
     fi
 
+    load_agent_config "cursor"
+    local verify_model="${WORKFLOW_AGENT_MODEL:-$AGENT_MODEL}"
+    echo -e "  配置文件: ${AGENTS_DIR}/cursor.md"
+    echo -e "  模型: ${verify_model}"
+    if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
+        echo -e "  System prompt: $(echo "$AGENT_SYSTEM_PROMPT" | wc -l | tr -d ' ') 行"
+    else
+        echo -e "  System prompt: (无)"
+    fi
+    echo ""
+
     echo -n "agent 连通性: "
-    if result=$(HTTP_PROXY= HTTPS_PROXY= timeout 15 agent --print --trust --model "$AGENT_MODEL" "Reply with only: OK" 2>&1); then
+    if result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd 15 agent --print --trust --model "$verify_model" "Reply with only: OK" 2>&1); then
         if echo "$result" | grep -qi "OK"; then
             echo -e "${GREEN}✓ 正常${NC}"
         else

@@ -260,7 +260,7 @@ workflow create "fix-memory-leak" cursor
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `WORKFLOW_AGENT_MODEL` | `gpt-5.3-codex` | Cursor Agent 使用的模型 |
+| `WORKFLOW_AGENT_MODEL` | (读取 `agents/cursor.md`) | Cursor Agent 使用的模型，覆盖配置文件 |
 | `WORKFLOW_POLL_INTERVAL` | `30` | issue 轮询间隔（秒） |
 | `WORKFLOW_ISSUE_LABEL` | `claude-ok` | issue 筛选标签 |
 | `WORKFLOW_PROJECT_NUMBER` | `3` | GitHub Project 编号 |

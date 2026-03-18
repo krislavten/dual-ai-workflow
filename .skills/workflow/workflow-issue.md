@@ -283,6 +283,24 @@ EOF
 - **Poll for replies** using `gh issue view --json comments`
 - **Identify user replies** by checking comment author (skip bot's own comments)
 
+### Identity Markers in Comments
+Since all comments are posted via `gh` under the same GitHub account, **prefix every comment with an identity marker** so humans can tell who said what:
+
+- `🧠 **[Claude Code — Proposal]**` — Claude's proposal or direction discussion
+- `🧠 **[Claude Code — Implementation]**` — Claude's implementation summary
+- `🤖 **[Cursor Agent — Proposal Review #N]**` — Cursor's proposal review (auto-synced by `workflow` CLI)
+- `🤖 **[Cursor Agent — Code Review #N]**` — Cursor's code review (auto-synced by `workflow` CLI)
+- `🔧 **[Workflow — Status]**` — automated status transitions
+
+**Claude must always use the `🧠` prefix** when posting comments:
+```bash
+workflow issue-comment <number> "🧠 **[Claude Code — Proposal]**
+
+<proposal content>"
+```
+
+**Cursor Agent reviews** are auto-synced by `workflow review-proposal` / `workflow review-code` with the `🤖` prefix — no manual action needed.
+
 ### Waiting for User Reply
 When you need user input (Normal mode), use this pattern:
 1. Post your question/proposal as a comment
@@ -330,7 +348,8 @@ Claude: "🤖 认领 #106，开始分析..."
 
 # Step 2: Direction discussion (Normal only)
 Claude (issue comment):
-  "## 🤖 方案讨论
+  "🧠 **[Claude Code — Direction Discussion]**
+
    看了 issue 描述，有 3 个方案选项。我倾向方案 B (withProjectAccess 高阶函数)，
    因为它最 DRY 且与现有 middleware 模式一致。
    请确认方向。"
@@ -349,7 +368,8 @@ Claude (issue comment):
 # Step 4: Cursor reviews proposal (≤5 rounds)
 Claude: [calls Cursor Agent to review proposal]
 Cursor: "APPROVE — 方案合理"
-Claude (issue comment): "✅ 方案经 Cursor Agent review 通过 (1 轮)"
+# auto-synced by CLI: "🤖 [Cursor Agent — Proposal Review #1 — APPROVED] ..."
+Claude (issue comment): "🧠 **[Claude Code — Status]** 方案经 Cursor Agent review 通过 (1 轮)"
 
 # Step 5-6: Implement + Cursor reviews code (≤5 rounds)
 Claude: [implements code on fix/issue-106 branch]
@@ -360,7 +380,8 @@ Cursor round 2: "APPROVE"
 
 # Step 7-8: Summary + PR
 Claude (issue comment):
-  "✅ 实现完成
+  "🧠 **[Claude Code — Implementation Complete]**
+
    - 方案 review (Cursor): 1 轮通过
    - 代码 review (Cursor): 2 轮通过
    🔗 PR #120 已创建，已移至 Reviewing。"
@@ -374,24 +395,27 @@ Claude (issue comment):
 [issue #118 has 'yolo' label]
 
 # Step 0: Claim
-Claude: "🤖 认领 #118 (YOLO 模式)，开始处理..."
+Claude: "🧠 **[Claude Code — Claimed]** 认领 #118 (YOLO 模式)，开始处理..."
 [comments on issue, board → In progress]
 
 # Step 3: Draft proposal (skip direction discussion)
 Claude: [drafts proposal based on issue description]
-Claude (issue comment): "📋 技术方案: ... 正在进行 AI peer review..."
+Claude (issue comment): "🧠 **[Claude Code — Proposal]** 技术方案: ... 正在进行 AI peer review..."
 
 # Step 4: Cursor reviews proposal (≤5 rounds)
 Claude: [calls Cursor Agent × 2 rounds]
-Claude (issue comment): "✅ 方案经 Cursor Agent review 通过 (2 轮)"
+# auto-synced by CLI: "🤖 [Cursor Agent — Proposal Review #1] ..."
+# auto-synced by CLI: "🤖 [Cursor Agent — Proposal Review #2 — APPROVED] ..."
 
 # Step 5-6: Implement + Cursor reviews code (≤5 rounds)
 Claude: [implements]
 Claude: [calls Cursor Agent to review code × 1 round]
+# auto-synced by CLI: "🤖 [Cursor Agent — Code Review #1 — APPROVED] ..."
 
 # Step 7-8: Summary + PR
 Claude (issue comment):
-  "✅ 实现完成
+  "🧠 **[Claude Code — Implementation Complete]**
+
    - 方案 review (Cursor): 2 轮通过
    - 代码 review (Cursor): 1 轮通过
    🔗 PR #121 已创建，已移至 Reviewing。"

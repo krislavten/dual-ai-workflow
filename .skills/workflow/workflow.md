@@ -200,7 +200,7 @@ workflow review-code <task-id>        # auto-calls agent
 
 **Option 2: Call agent directly:**
 ```bash
-response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex "你正在 review 一份技术方案。
+response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "你正在 review 一份技术方案。
 
 任务: <task-name>
 
@@ -217,8 +217,35 @@ response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex 
 **Important notes on calling agent:**
 - Always unset `HTTP_PROXY` and `HTTPS_PROXY` to avoid proxy issues
 - Use `--trust` for non-interactive (headless) mode
-- Use `--model gpt-5.3-codex` (configurable via `WORKFLOW_AGENT_MODEL`)
-- Agent model can be changed via env var: `export WORKFLOW_AGENT_MODEL=sonnet-4`
+- Model and system prompt are configured in `agents/cursor.md` (default: `gpt-5.3-codex-xhigh`)
+- Override model via env var: `export WORKFLOW_AGENT_MODEL=sonnet-4`
+
+### Issue Sync Protocol
+
+When a task has an associated `issue_number` in `meta.json`, **sync key actions to the Issue as comments with identity markers**:
+
+- The `workflow` CLI auto-syncs review results (Cursor Agent reviews)
+- **You (Claude) must manually sync your own actions** using:
+  ```bash
+  workflow issue-comment <number> "🧠 **[Claude Code — <Phase>]**
+
+  <your content here>"
+  ```
+
+**What to sync to Issue:**
+1. **Proposal draft** — post summary when you write the proposal
+2. **Your responses to reviewer feedback** — when you address Cursor's concerns
+3. **Implementation summary** — when code is done
+4. **Status changes** — approved, blocked, etc.
+
+**Identity markers (so humans can tell who said what):**
+- `🧠 **[Claude Code — Proposal]**` — Claude's proposal
+- `🧠 **[Claude Code — Implementation]**` — Claude's code summary
+- `🤖 **[Cursor Agent — Proposal Review]**` — Cursor's review (auto-synced by CLI)
+- `🤖 **[Cursor Agent — Code Review]**` — Cursor's review (auto-synced by CLI)
+- `🔧 **[Workflow — Status]**` — status transitions (auto-synced by CLI)
+
+**When there is NO `issue_number`**: skip all sync, work purely locally.
 
 ### Communication Protocol
 - All artifacts in `.workflow/plans/<task-id>/`
