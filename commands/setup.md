@@ -66,11 +66,14 @@ If not logged in, ask the user: "gh 需要登录 GitHub，要现在登录吗？"
 command -v agent
 ```
 
-If missing, tell the user:
-- 方式 1: 打开 Cursor 编辑器 → Cmd+Shift+P → "Install agent command"
-- 方式 2: `npm install -g @anthropic-ai/cursor-agent`
+If missing, install it:
+```bash
+curl https://cursor.com/install -fsS | bash
+```
 
-Ask if they want you to try npm install. If agent is still not found after installation, ask the user to install manually and re-run `/setup`.
+After installation, verify: `command -v agent`
+
+If curl install fails, tell the user to install manually from https://cursor.com/install and re-run `/workflow:setup`.
 
 ## Step 3: Install workflow CLI
 

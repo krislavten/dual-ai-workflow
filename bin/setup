@@ -150,34 +150,22 @@ check_dependencies() {
         fi
     fi
 
-    # agent CLI 需要特殊处理（不在 brew 里）
+    # agent CLI
     if ! command -v agent &>/dev/null; then
         echo ""
-        echo -e "  ${YELLOW}Cursor Agent CLI 需要通过 npm 安装:${NC}"
-        echo ""
-
-        if command -v npm &>/dev/null; then
-            if prompt_yn "  自动安装 @anthropic-ai/cursor-agent？" "y"; then
-                npm install -g @anthropic-ai/cursor-agent 2>/dev/null && {
-                    echo -e "  ${GREEN}agent CLI 安装成功${NC}"
-                } || {
-                    echo -e "  ${YELLOW}npm 安装失败，尝试其他方式...${NC}"
-                }
-            fi
-        fi
-
-        # 如果 npm 安装失败或用户拒绝，给手动指引
-        if ! command -v agent &>/dev/null; then
+        echo -e "  ${YELLOW}Cursor Agent CLI 未安装，正在安装...${NC}"
+        curl https://cursor.com/install -fsS | bash && {
+            echo -e "  ${GREEN}agent CLI 安装成功${NC}"
+        } || {
+            echo -e "  ${YELLOW}自动安装失败${NC}"
             echo ""
-            echo -e "  请手动安装 Cursor Agent CLI:"
-            echo -e "    ${DIM}方式 1: 打开 Cursor → Cmd+Shift+P → 'Install agent command'${NC}"
-            echo -e "    ${DIM}方式 2: npm install -g @anthropic-ai/cursor-agent${NC}"
+            echo -e "  请手动安装: ${DIM}curl https://cursor.com/install -fsS | bash${NC}"
             echo ""
             if ! prompt_yn "  已安装完成？继续 setup？" "n"; then
                 echo -e "${RED}请安装 agent CLI 后重新运行 ./bin/setup${NC}"
                 exit 1
             fi
-        fi
+        }
     fi
 
     # 最终检查必要依赖
