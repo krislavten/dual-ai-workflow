@@ -5,7 +5,7 @@ Claude Code plugin for dual AI collaboration — Claude Code executes, Cursor Ag
 ## Install
 
 ```
-/install github:krislavten/dual-ai-workflow
+/plugin install github:krislavten/dual-ai-workflow
 ```
 
 Then run `/setup` to configure dependencies and Cursor Agent model.
