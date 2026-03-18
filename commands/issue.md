@@ -1,5 +1,5 @@
 ---
-description: GitHub Issue-driven dual AI workflow - Poll issues, discuss via comments, implement with peer review
+description: GitHub Issue-driven - Poll issues, discuss via comments, implement with peer review
 argument-hint: <project-url> [issue-number]
 ---
 

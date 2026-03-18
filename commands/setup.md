@@ -1,5 +1,5 @@
 ---
-description: Set up Dual AI Workflow - install dependencies, configure Cursor Agent model, and initialize environment
+description: Set up Sparring - install dependencies, configure Cursor Agent model, and initialize environment
 argument-hint: (no arguments needed)
 ---
 
@@ -73,7 +73,7 @@ curl https://cursor.com/install -fsS | bash
 
 After installation, verify: `command -v agent`
 
-If curl install fails, tell the user to install manually from https://cursor.com/install and re-run `/workflow:setup`.
+If curl install fails, tell the user to install manually from https://cursor.com/install and re-run `/sparring:setup`.
 
 ## Step 3: Install workflow CLI
 
@@ -244,9 +244,9 @@ Tell the user:
 Setup 完成！
 
 开始使用：
-  /workflow <任务描述> <claude|cursor>   — 普通模式
-  /workflow-yolo <任务描述> <executor>   — 全自动模式
-  /workflow-issue                        — Issue 驱动模式
+  /sparring:workflow <任务描述>   — 普通模式
+  /sparring:yolo <任务描述>      — 全自动模式
+  /sparring:issue <看板URL>      — Issue 驱动模式
 
 更多帮助: workflow help
 ```

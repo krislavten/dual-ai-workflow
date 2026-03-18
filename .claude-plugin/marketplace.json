@@ -1,14 +1,14 @@
 {
-  "name": "dual-ai-workflow",
+  "name": "sparring",
   "owner": {
     "name": "krislavten"
   },
   "plugins": [
     {
-      "name": "workflow",
+      "name": "sparring",
       "source": "./",
-      "description": "Claude Code + Cursor Agent dual AI collaborative workflow",
-      "version": "1.0.0"
+      "description": "Dual AI peer review — Claude Code writes, Cursor Agent challenges",
+      "version": "2.0.0"
     }
   ]
 }

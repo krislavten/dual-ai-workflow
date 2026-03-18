@@ -1,5 +1,5 @@
 ---
-description: Dual AI collaborative workflow - Execute tasks with automatic Cursor Agent peer review
+description: Execute tasks with automatic Cursor Agent peer review
 argument-hint: <task-description> [claude|cursor]
 ---
 

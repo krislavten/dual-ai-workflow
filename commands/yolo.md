@@ -1,5 +1,5 @@
 ---
-description: Fully automated dual AI workflow - AI handles everything, user only confirms final commit
+description: Fully automated - AI handles everything, user only confirms final commit
 argument-hint: <task-description> [claude|cursor]
 ---
 

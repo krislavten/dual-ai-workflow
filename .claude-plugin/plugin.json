@@ -1,7 +1,7 @@
 {
-  "name": "workflow",
-  "description": "Dual AI collaborative workflow — Claude Code executes, Cursor Agent reviews",
-  "version": "1.0.0",
+  "name": "sparring",
+  "description": "Dual AI peer review — Claude Code writes, Cursor Agent challenges",
+  "version": "2.0.0",
   "author": {
     "name": "krislavten"
   },
