@@ -1,0 +1,10 @@
+{
+  "name": "workflow",
+  "description": "Dual AI collaborative workflow — Claude Code executes, Cursor Agent reviews",
+  "version": "1.0.0",
+  "author": {
+    "name": "krislavten"
+  },
+  "repository": "https://github.com/krislavten/dual-ai-workflow",
+  "license": "MIT"
+}

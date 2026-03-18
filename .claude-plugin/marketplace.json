@@ -1,0 +1,14 @@
+{
+  "name": "dual-ai-workflow",
+  "owner": {
+    "name": "krislavten"
+  },
+  "plugins": [
+    {
+      "name": "workflow",
+      "source": "./",
+      "description": "Claude Code + Cursor Agent dual AI collaborative workflow",
+      "version": "1.0.0"
+    }
+  ]
+}

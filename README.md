@@ -6,19 +6,19 @@ Claude Code plugin for dual AI collaboration — Claude Code executes, Cursor Ag
 
 ```
 /plugin marketplace add krislavten/dual-ai-workflow
-/plugin install dual-ai-workflow
+/plugin install workflow@dual-ai-workflow
 ```
 
-Then run `/setup` to configure dependencies and Cursor Agent model.
+Then run `/workflow:setup` to configure dependencies and Cursor Agent model.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/setup` | Install dependencies, select model, configure environment |
-| `/workflow <task> <executor>` | Normal mode — discuss with user, then auto review |
-| `/workflow-yolo <task> <executor>` | YOLO mode — fully automated, user only confirms commit |
-| `/workflow-issue [number]` | Issue-driven mode — task from GitHub Issue, sync via comments |
+| `/workflow:setup` | Install dependencies, select model, configure environment |
+| `/workflow:workflow <task> <executor>` | Normal mode — discuss with user, then auto review |
+| `/workflow:workflow-yolo <task> <executor>` | YOLO mode — fully automated, user only confirms commit |
+| `/workflow:workflow-issue [number]` | Issue-driven mode — task from GitHub Issue, sync via comments |
 
 ## How It Works
 
