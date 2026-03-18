@@ -208,14 +208,32 @@ APPROVE 和 CONCERNS 二选一，不要混用。
 没有把握时宁可提 CONCERNS。放过一个问题的代价远大于多讨论一轮的成本。
 ```
 
-## Step 6: Verify
+## Step 6: Permissions (Optional)
+
+Ask the user: "workflow 需要频繁调用 bash 命令（workflow CLI、agent CLI、gh CLI）。是否允许自动执行这些命令，不用每次确认？"
+
+If yes, tell the user to run:
+```
+/permissions
+```
+And add these allow rules (or guide them through it):
+- `Bash(workflow *)` — workflow CLI commands
+- `Bash(agent *)` — Cursor Agent calls
+- `Bash(gh *)` — GitHub CLI calls
+- `Bash(HTTP_PROXY= *)` — agent calls with proxy unset
+
+Or if they prefer full trust for this session, they can use **bypass permissions mode** in Claude Code settings.
+
+If no, tell them: "没问题，每次执行命令时会弹出确认。"
+
+## Step 7: Verify
 
 Run verification:
 ```bash
 workflow verify
 ```
 
-## Step 7: Done
+## Step 8: Done
 
 Tell the user:
 
