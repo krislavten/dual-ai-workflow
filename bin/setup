@@ -150,22 +150,23 @@ check_dependencies() {
         fi
     fi
 
-    # agent CLI
+    # agent CLI — 直接安装，不需要确认
     if ! command -v agent &>/dev/null; then
         echo ""
-        echo -e "  ${YELLOW}Cursor Agent CLI 未安装，正在安装...${NC}"
-        curl https://cursor.com/install -fsS | bash && {
-            echo -e "  ${GREEN}agent CLI 安装成功${NC}"
-        } || {
-            echo -e "  ${YELLOW}自动安装失败${NC}"
-            echo ""
-            echo -e "  请手动安装: ${DIM}curl https://cursor.com/install -fsS | bash${NC}"
-            echo ""
-            if ! prompt_yn "  已安装完成？继续 setup？" "n"; then
-                echo -e "${RED}请安装 agent CLI 后重新运行 ./bin/setup${NC}"
-                exit 1
+        echo -e "  ${YELLOW}正在安装 Cursor Agent CLI...${NC}"
+        if curl https://cursor.com/install -fsS | bash; then
+            # installer 可能装到新路径，刷新
+            export PATH="$HOME/.local/bin:$HOME/.cursor/bin:$PATH"
+            if command -v agent &>/dev/null; then
+                echo -e "  ${GREEN}agent CLI 安装成功${NC}"
+            else
+                echo -e "${RED}安装完成但 agent 命令未找到，请检查 PATH${NC}"
             fi
-        }
+        else
+            echo -e "${RED}agent CLI 安装失败${NC}"
+            echo -e "  手动安装: ${DIM}curl https://cursor.com/install -fsS | bash${NC}"
+            exit 1
+        fi
     fi
 
     # 最终检查必要依赖
