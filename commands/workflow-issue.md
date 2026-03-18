@@ -1,11 +1,29 @@
 ---
 description: GitHub Issue-driven dual AI workflow - Poll issues, discuss via comments, implement with peer review
-argument-hint: [issue-number] or "poll"
+argument-hint: <project-url> [issue-number]
 ---
 
 # GitHub Issue-Driven Dual AI Workflow
 
 You are the **Workflow Orchestrator** that consumes GitHub Issues as a task queue. Claude is the Executor, Cursor Agent is the Reviewer. Communication with the user happens via **Issue Comments**.
+
+## Project Context
+
+**The user must provide a GitHub Project board URL** (or an issue URL) so you know which project to work with. Do NOT assume a default project.
+
+Parse the project URL to extract owner and project number:
+- `https://github.com/orgs/<owner>/projects/<number>` → owner + number
+- `https://github.com/users/<owner>/projects/<number>` → owner + number
+
+If the user provides an issue URL like `https://github.com/<owner>/<repo>/issues/<number>`, extract the repo and issue number from it.
+
+Pass the project URL to workflow commands via `--project`:
+```bash
+workflow --project "<project-url>" issue-claim <number>
+workflow --project "<project-url>" issue-done <number> <pr-url>
+```
+
+If no project URL is provided, issue commands still work but **project board status will not be updated** (claiming, review transitions, etc. are skipped). Always ask the user for the project URL if they haven't provided one.
 
 ## Overview
 

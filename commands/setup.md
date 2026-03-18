@@ -208,30 +208,14 @@ APPROVE 和 CONCERNS 二选一，不要混用。
 没有把握时宁可提 CONCERNS。放过一个问题的代价远大于多讨论一轮的成本。
 ```
 
-## Step 6: Configure Issue Mode (Optional)
-
-Ask the user: "是否配置 Issue 驱动模式？（用于从 GitHub Issue 获取任务，讨论同步到 Issue comment）"
-
-If yes:
-1. Detect repo from current directory: `git remote get-url origin`
-2. Ask for GitHub org/user name (pre-fill from detected repo)
-3. Ask for Project number
-4. Ask for Issue filter label (default: `claude-ok`)
-5. Tell the user to add these env vars to their shell config:
-   ```
-   export WORKFLOW_PROJECT_OWNER="<owner>"
-   export WORKFLOW_PROJECT_NUMBER="<number>"
-   export WORKFLOW_ISSUE_LABEL="<label>"
-   ```
-
-## Step 7: Verify
+## Step 6: Verify
 
 Run verification:
 ```bash
 workflow verify
 ```
 
-## Step 8: Done
+## Step 7: Done
 
 Tell the user:
 

@@ -32,8 +32,44 @@ AGENTS_DIR="${AGENTS_DIR:-$(_resolve_script_dir)/agents}"
 # GitHub Issue 配置
 ISSUE_POLL_INTERVAL="${WORKFLOW_POLL_INTERVAL:-30}"
 ISSUE_LABEL="${WORKFLOW_ISSUE_LABEL:-claude-ok}"
-ISSUE_PROJECT_NUMBER="${WORKFLOW_PROJECT_NUMBER:-3}"
-ISSUE_PROJECT_OWNER="${WORKFLOW_PROJECT_OWNER:-kanyun-inc}"
+ISSUE_PROJECT_NUMBER="${WORKFLOW_PROJECT_NUMBER:-}"
+ISSUE_PROJECT_OWNER="${WORKFLOW_PROJECT_OWNER:-}"
+
+# ─── Project 链接解析 ────────────────────────────────────────
+
+# 从 GitHub Project URL 解析 owner 和 number
+# 支持格式: https://github.com/orgs/<owner>/projects/<number>
+#           https://github.com/users/<owner>/projects/<number>
+parse_project_url() {
+    local url="$1"
+    if [[ "$url" =~ github\.com/(orgs|users)/([^/]+)/projects/([0-9]+) ]]; then
+        ISSUE_PROJECT_OWNER="${BASH_REMATCH[2]}"
+        ISSUE_PROJECT_NUMBER="${BASH_REMATCH[3]}"
+        return 0
+    fi
+    return 1
+}
+
+# 设置 project 上下文（从 URL 或环境变量）
+# Usage: set_project "https://github.com/orgs/xxx/projects/3"
+#   or:  set_project  (使用环境变量)
+set_project() {
+    local url="${1:-}"
+    if [[ -n "$url" ]]; then
+        if parse_project_url "$url"; then
+            echo -e "${DIM}  Project: ${ISSUE_PROJECT_OWNER} #${ISSUE_PROJECT_NUMBER}${NC}" >&2
+        else
+            echo -e "${RED}错误: 无法解析 project URL: ${url}${NC}" >&2
+            echo "  支持格式: https://github.com/orgs/<owner>/projects/<number>" >&2
+            return 1
+        fi
+    fi
+
+    if [[ -z "$ISSUE_PROJECT_OWNER" || -z "$ISSUE_PROJECT_NUMBER" ]]; then
+        echo -e "${YELLOW}⚠ 未指定 project，看板状态不会更新${NC}" >&2
+        echo "  传入 project URL 或设置 WORKFLOW_PROJECT_OWNER + WORKFLOW_PROJECT_NUMBER" >&2
+    fi
+}
 
 # ─── 依赖检查 ───────────────────────────────────────────────
 
@@ -753,6 +789,10 @@ detect_repo() {
 # 获取 issue 的 project item ID（用于更新看板状态）
 get_project_item_id() {
     local issue_number="$1"
+
+    # 没有 project 配置时直接跳过
+    [[ -z "$ISSUE_PROJECT_OWNER" || -z "$ISSUE_PROJECT_NUMBER" ]] && return 1
+
     local repo
     repo=$(detect_repo)
 
@@ -1289,6 +1329,20 @@ verify() {
 main() {
     check_deps
 
+    # 提取 --project <url> 参数
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project)
+                shift
+                set_project "${1:-}" || exit 1
+                shift
+                ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    set -- "${args[@]}"
+
     local command="${1:-help}"
     shift 2>/dev/null || true
 
@@ -1349,24 +1403,27 @@ ${YELLOW}GitHub Issue 集成:${NC}
   ${GREEN}issue-read${NC} <number> [count]   读取 issue 最近的 comments (默认 5 条)
   ${GREEN}issue-wait-reply${NC} <number>     轮询等待 issue 新回复 (每 ${ISSUE_POLL_INTERVAL}s，最多 10min)
   ${GREEN}issue-done${NC} <number> [pr_url]  标记完成 (状态 → Reviewing + 发布 comment)
-  ${GREEN}issue-status${NC} <number> <status> 更新 issue 看板状态 (Backlog/Planning/In progress/Reviewing/Done)
+  ${GREEN}issue-status${NC} <number> <status> 更新 issue 看板状态
+
+${YELLOW}全局选项:${NC}
+  ${GREEN}--project${NC} <url>               指定 GitHub Project 看板 URL
+                                (例: https://github.com/orgs/xxx/projects/3)
 
 ${YELLOW}环境变量:${NC}
   WORKFLOW_AGENT_MODEL    agent 使用的模型 (读取 agents/cursor.md)
   WORKFLOW_POLL_INTERVAL  issue 轮询间隔秒数 (默认: ${ISSUE_POLL_INTERVAL})
   WORKFLOW_ISSUE_LABEL    issue 筛选标签 (默认: ${ISSUE_LABEL})
-  WORKFLOW_PROJECT_NUMBER project 编号 (默认: ${ISSUE_PROJECT_NUMBER})
-  WORKFLOW_PROJECT_OWNER  project 所属组织 (默认: ${ISSUE_PROJECT_OWNER})
+  WORKFLOW_PROJECT_NUMBER project 编号 (环境变量或 --project)
+  WORKFLOW_PROJECT_OWNER  project 所属组织 (环境变量或 --project)
 
 ${YELLOW}示例:${NC}
   workflow setup                             # 交互式初始化
   workflow verify                           # 检查环境
   workflow create "refactor-auth" claude     # 创建任务
   workflow review-proposal <task-id>        # 自动 review
-  workflow issue-poll                       # 扫描可认领 issue
+  workflow --project https://github.com/orgs/kanyun-inc/projects/3 issue-poll
   workflow issue-claim 106                  # 认领 issue #106
   workflow issue-comment 106 "方案 LGTM"   # 发布 comment
-  workflow issue-read 106                   # 读取最近 comments
 
 EOF
             ;;

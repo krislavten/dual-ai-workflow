@@ -245,6 +245,45 @@ test_validate_task_name_invalid() {
 test_validate_task_name_invalid
 
 echo ""
+echo "=== parse_project_url ==="
+
+test_parse_org_url() {
+    source_workflow_funcs
+    ISSUE_PROJECT_OWNER="" ISSUE_PROJECT_NUMBER=""
+    parse_project_url "https://github.com/orgs/kanyun-inc/projects/3"
+    assert_eq "org URL — owner" "kanyun-inc" "$ISSUE_PROJECT_OWNER"
+    assert_eq "org URL — number" "3" "$ISSUE_PROJECT_NUMBER"
+}
+test_parse_org_url
+
+test_parse_user_url() {
+    source_workflow_funcs
+    ISSUE_PROJECT_OWNER="" ISSUE_PROJECT_NUMBER=""
+    parse_project_url "https://github.com/users/kris/projects/7"
+    assert_eq "user URL — owner" "kris" "$ISSUE_PROJECT_OWNER"
+    assert_eq "user URL — number" "7" "$ISSUE_PROJECT_NUMBER"
+}
+test_parse_user_url
+
+test_parse_invalid_url() {
+    source_workflow_funcs
+    local status=0
+    parse_project_url "https://github.com/kanyun-inc/rush" 2>/dev/null || status=$?
+    assert_eq "invalid URL fails" "1" "$status"
+}
+test_parse_invalid_url
+
+test_no_project_graceful() {
+    source_workflow_funcs
+    ISSUE_PROJECT_OWNER="" ISSUE_PROJECT_NUMBER=""
+    # get_project_item_id should return 1 silently
+    local status=0
+    get_project_item_id "123" 2>/dev/null || status=$?
+    assert_eq "no project config — skips gracefully" "1" "$status"
+}
+test_no_project_graceful
+
+echo ""
 echo "=== commands/ frontmatter ==="
 
 test_commands_frontmatter() {
