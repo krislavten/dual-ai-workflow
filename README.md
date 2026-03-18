@@ -53,17 +53,20 @@
 ## 安装
 
 ```bash
-# 克隆仓库
 git clone git@github.com:krislavten/dual-ai-workflow.git ~/develop/dual-ai-workflow
-
-# 运行安装脚本
 cd ~/develop/dual-ai-workflow
-./install.sh
+./bin/setup
 ```
 
-安装脚本会：
-- 创建 `workflow` 命令软链接到 `~/.local/bin/`
-- 安装 `/workflow` skill 到 `~/.claude/skills/`
+交互式引导你完成：
+1. 检测依赖（jq、gh、Cursor Agent CLI）
+2. 选择 Cursor Agent 模型（xhigh / high / standard / opus）
+3. 配置 Issue 驱动模式（可选）
+4. 安装 `workflow` 命令 + Claude Code `/workflow` skill
+5. 生成 `agents/cursor.md` 配置
+6. 验证环境
+
+安装完成后可随时用 `workflow setup` 重新配置。
 
 ## 使用方式
 
