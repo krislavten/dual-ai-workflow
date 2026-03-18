@@ -1,28 +1,54 @@
 ---
 description: Dual AI collaborative workflow - Execute tasks with automatic Cursor Agent peer review
-argument-hint: <task-description> <claude|cursor>
+argument-hint: <task-description> [claude|cursor]
 ---
 
 # Dual AI Workflow
 
 You are the **Workflow Orchestrator** managing collaboration between two AI agents with user checkpoints.
 
-## Modes
+Default executor is **claude** (you). Cursor Agent is the reviewer.
 
-### Normal Mode (default): `/workflow <task> <executor>`
-User participates at key decision points:
-1. User + Executor discuss and draft proposal together
-2. Executor ↔ Reviewer auto-iterate on proposal (no user)
-3. **User confirms proposal**
-4. Executor ↔ Reviewer auto-implement code (no user)
-5. **User confirms implementation**
-6. Commit
+## Cross-Review Principle
 
-## Phase 1: Plan Stage
+**Before giving the user any conclusion, recommendation, or decision — get it reviewed by Cursor Agent first.**
 
-### Step 1: User + Executor Co-design
+### MUST review (before presenting to user):
+- Technical proposals and architecture designs
+- Technology recommendations ("use Redis", "switch to PostgreSQL")
+- Refactoring directions ("should split into 3 modules")
+- Any "I recommend...", "you should...", "the best approach is..." conclusions
+- Code implementations
+- Final summaries and decisions
 
-When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
+### Does NOT need review:
+- Questions to the user ("what's your requirement?")
+- Stating facts about existing code ("the current auth uses JWT")
+- Confirming understanding ("so you want to refactor the login flow?")
+- Listing options without recommending ("there are 3 approaches: A, B, C — which do you prefer?")
+
+### How to call the reviewer for ad-hoc conclusions:
+```bash
+response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "你正在 review 一个技术建议。
+
+上下文: <context>
+
+建议: <the conclusion you want to give>
+
+请 review 并回复:
+- APPROVE: 如果建议合理
+- CONCERNS: <编号列表> 如果有问题")
+```
+
+If Cursor raises CONCERNS, reconsider your conclusion before presenting to the user. You may adjust it, or present both perspectives and let the user decide.
+
+## Workflow Phases
+
+### Phase 1: Plan Stage
+
+#### Step 1: User + Executor Co-design
+
+When the user invokes `/workflow <task-description> [executor]` (default executor: claude):
 
 1. **Initialize Task**
    ```bash
@@ -34,59 +60,54 @@ When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
    - Ask clarifying questions about requirements
    - Discuss approach options with user
    - Understand constraints and priorities
-   - **Output**: Draft outline of proposal
 
-### Step 2: Executor Writes Formal Proposal
+#### Step 2: Executor Writes Formal Proposal
 
 3. **Write Complete Proposal**
    - Create `.workflow/plans/<task-id>/proposal.md`
    - Include: executive summary, architecture design, implementation approach, risks and mitigations, alternatives considered
 
-### Step 3: Auto-Review Loop (No User)
+#### Step 3: Auto-Review Loop (No User)
 
-4. **Executor ↔ Reviewer Iteration**
-   ```
-   while not approved and rounds < 5:
-     reviewer: call `workflow review-proposal <task-id>`
-     if APPROVE: break
-     else: executor address concerns, update proposal
-   ```
+4. **MUST call reviewer**: `workflow review-proposal <task-id>`
+   - Cursor Agent auto-reviews. If CONCERNS, address them and call again.
+   - Repeat up to 5 rounds.
 
-### Step 4: User Confirmation
+#### Step 4: User Confirmation
 
 5. **Present to User** with summary, wait for approval
 6. If user says no: go back to Step 1. If yes: proceed to Phase 2.
 
-## Phase 2: Implementation Stage
+### Phase 2: Implementation Stage
 
-### Step 5: Auto-Implementation (No User)
+#### Step 5: Auto-Implementation (No User)
 
-7. **Executor ↔ Reviewer Auto-Code**
-   ```
-   executor: implement code per proposal
-   while not approved and rounds < 5:
-     reviewer: call `workflow review-code <task-id>`
-     if APPROVE: break
-     else: executor fix issues
-   ```
+7. **Implement code** per approved proposal
+8. **MUST call reviewer**: `workflow review-code <task-id>`
+   - Cursor Agent auto-reviews code. If CONCERNS, fix and call again.
+   - Repeat up to 5 rounds.
 
-### Step 6: User Final Confirmation
+#### Step 6: User Final Confirmation
 
-8. **Present Implementation** with changes summary, test status, diff
-9. **Commit if Approved**
+9. **Present Implementation** with changes summary, test status, diff
+10. **Commit if Approved**
 
 ## Key Instructions
 
-### When YOU are Executor (Claude)
+### When YOU are Executor (Claude) — default
 
 1. **Engage user first** - Ask questions, discuss approaches
 2. **Co-create draft** with user input
-3. **Write formal proposal** incorporating user's preferences
-4. **Auto-iterate with reviewer** until both approve
+3. **Write formal proposal** to `.workflow/plans/<task-id>/proposal.md`
+4. **MUST call reviewer**: `workflow review-proposal <task-id>`
 5. **Present to user** with summary, wait for approval
 6. **Implement code** after user confirms
-7. **Auto-iterate on code** with reviewer
+7. **MUST call reviewer**: `workflow review-code <task-id>`
 8. **Present to user** for final approval
+
+**The reviewer steps (4 and 7) are NOT optional.** Every proposal and implementation MUST go through Cursor Agent review before presenting to the user.
+
+**Ad-hoc review**: When you want to give the user a technical recommendation or conclusion during discussion (Step 1), call Cursor Agent directly to review it before presenting. Don't skip this for significant decisions.
 
 ### When YOU are Reviewer (for Cursor's work)
 - **Use the `workflow` CLI** or call agent directly
@@ -95,13 +116,13 @@ When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
 
 ### Calling Other Agent
 
-**Option 1: Use the CLI (recommended):**
+**Option 1: Use the CLI (for formal proposal/code review):**
 ```bash
-workflow review-proposal <task-id>    # auto-calls agent
-workflow review-code <task-id>        # auto-calls agent
+workflow review-proposal <task-id>    # auto-calls agent with full context
+workflow review-code <task-id>        # auto-calls agent with diff
 ```
 
-**Option 2: Call agent directly:**
+**Option 2: Call agent directly (for ad-hoc conclusion review):**
 ```bash
 response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "<review prompt>")
 ```
@@ -152,6 +173,7 @@ When a task has an associated `issue_number` in `meta.json`, **sync key actions 
 2. **Max 5 rounds** - Escalate to user if can't agree
 3. **Save all artifacts** - Full audit trail
 4. **Clear progress** - Log each iteration
+5. **Review conclusions too** - Not just proposals and code
 
 ## Error Handling
 

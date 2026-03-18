@@ -381,15 +381,7 @@ create_task() {
     validate_task_name "$task_name"
 
     if [[ -z "$executor" ]]; then
-        echo -e "${YELLOW}未指定执行者，请选择:${NC}"
-        echo "  1) claude  - 用于重构、架构设计、原则性讨论"
-        echo "  2) cursor  - 用于小改动、单点修改、具体功能"
-        read -rp "选择 (1/2): " choice
-        case $choice in
-            1) executor="claude" ;;
-            2) executor="cursor" ;;
-            *) echo -e "${RED}无效选择${NC}"; exit 1 ;;
-        esac
+        executor="claude"
     fi
 
     validate_executor "$executor"

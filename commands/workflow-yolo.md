@@ -1,6 +1,6 @@
 ---
 description: Fully automated dual AI workflow - AI handles everything, user only confirms final commit
-argument-hint: <task-description> <claude|cursor>
+argument-hint: <task-description> [claude|cursor]
 ---
 
 # Dual AI Workflow - YOLO Mode
@@ -25,44 +25,34 @@ Executor: "Done! Commit? (yes/no)"
 User: yes → Commit!
 ```
 
+## Cross-Review Principle
+
+Same as normal mode: **every conclusion, recommendation, and decision must be reviewed by Cursor Agent before presenting to the user.** In YOLO mode this includes:
+- The proposal itself (via `workflow review-proposal`)
+- Any key technical decisions made during implementation
+- The final code (via `workflow review-code`)
+
 ## Instructions
 
-### If YOU are the Executor
+### If YOU are the Executor (default: claude)
 
-1. **Create task**: `workflow create "<name>" <executor>`
+1. **Create task**: `workflow create "<name>"` (defaults to claude)
 
 2. **Draft proposal independently**
-   - Don't ask user for input
-   - Use your best judgment
-   - Write complete technical proposal
+   - Don't ask user for input — use your best judgment
    - Save to `.workflow/plans/<task-id>/proposal.md`
 
-3. **Auto-review loop**
-   ```bash
-   # Option A: Use CLI
-   workflow review-proposal <task-id>
-
-   # Option B: Call agent directly
-   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "Review this proposal: ...")
-   ```
+3. **MUST call reviewer**: `workflow review-proposal <task-id>`
+   - If CONCERNS, address and retry. Up to 5 rounds.
 
 4. **Implement code** — follow approved proposal, write tests
 
-5. **Auto-code review loop**
-   ```bash
-   workflow review-code <task-id>
-   ```
+5. **MUST call reviewer**: `workflow review-code <task-id>`
+   - If CONCERNS, fix and retry. Up to 5 rounds.
 
 6. **Present final result** — summary, changes, review iterations, ask to commit
 
 7. **If user approves**: Create commit
-
-### If YOU are the Reviewer
-
-- Wait to be called by executor via `agent --print`
-- Review thoroughly
-- Respond with `APPROVE` or `CONCERNS: <list>`
-- Don't involve user
 
 ## When to Use YOLO
 
