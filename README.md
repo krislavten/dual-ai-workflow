@@ -126,6 +126,52 @@ clawteam board attach my-project
 
 每个 worker 在独立的 git worktree + tmux window 里工作，互不干扰。
 
+### Issue + Team：从看板接任务，拆分并行开发
+
+适合大的 Issue——一个人做太慢，拆成子任务让多个 agent 并行。
+
+```bash
+# 1. 认领 Issue
+workflow --project https://github.com/orgs/your-org/projects/3 issue-claim 106
+
+# 2. 读 Issue 内容，规划子任务
+gh issue view 106 --json body,title
+
+# 3. 创建团队，按子任务 spawn worker
+clawteam team spawn-team issue-106 -d "Issue #106: 重构用户认证" -n leader
+
+clawteam spawn tmux claude --team issue-106 --agent-name auth \
+  --task "实现 OAuth2 模块。完成后运行 workflow review-code issue-106 让 Cursor 审查"
+
+clawteam spawn tmux claude --team issue-106 --agent-name tests \
+  --task "给认证模块写集成测试。完成后运行 workflow review-code issue-106 让 Cursor 审查"
+
+# 4. 等所有 worker 完成后，合并并提 PR
+# leader 合并各 worktree，创建 PR 关联 Issue
+workflow --project https://github.com/orgs/your-org/projects/3 issue-done 106 <pr-url>
+```
+
+### 自动接单：Loop 轮询看板
+
+让 Claude 定时轮询看板，有新 Issue 自动认领并启动 Team。
+
+```bash
+# 在 Claude Code 里用 /loop 技能，每 5 分钟轮询一次
+/loop 5m /sparring:issue https://github.com/orgs/your-org/projects/3
+```
+
+或者用 `workflow` CLI 手动轮询：
+
+```bash
+# 一次性扫描可认领的 Issue
+workflow --project https://github.com/orgs/your-org/projects/3 issue-poll
+
+# 持续轮询（用 watch）
+watch -n 300 workflow --project https://github.com/orgs/your-org/projects/3 issue-poll
+```
+
+流程：发现新 Issue → 认领 → 分析复杂度 → 小任务直接 Sparring 单 agent 做 → 大任务启动 ClawTeam 并行。
+
 ## 审查者配置
 
 Cursor Agent 的模型和 prompt 在 `agents/cursor.md`，由 `/sparring:setup` 生成。
