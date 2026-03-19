@@ -86,6 +86,46 @@ Cursor 挑战代码（最多 5 轮）
 
 每次对话传看板链接就行，不需要固定配置。
 
+## 多 Agent 并行 + 审查（配合 ClawTeam）
+
+Sparring 负责审查质量，[ClawTeam](https://github.com/HKUDS/ClawTeam) 负责多 agent 并行编排。两个组合使用，每个 agent 既能并行加速，又有质量保障。
+
+```
+ClawTeam 分 3 个任务并行
+  ├── Claude #1: auth 模块  ← Sparring: Cursor 审查
+  ├── Claude #2: database 层 ← Sparring: Cursor 审查
+  └── Claude #3: frontend   ← Sparring: Cursor 审查
+```
+
+### 安装 ClawTeam
+
+```bash
+# 官方版
+pipx install clawteam
+
+# Bedrock 适配版（推荐，修复了 Bedrock Claude Code 的启动等待问题）
+pipx install git+https://github.com/krislavten/ClawTeam.git@fix/claude-bedrock-spawn-timing
+```
+
+### 使用
+
+```bash
+# 1. 创建团队
+clawteam team spawn-team my-project -d "重构用户系统" -n leader
+
+# 2. Spawn 多个 Claude Code worker，各自独立工作 + Sparring 审查
+clawteam spawn tmux claude --team my-project --agent-name auth \
+  --task "实现 auth 模块。写完后运行 workflow review-code my-project 让 Cursor 审查"
+
+clawteam spawn tmux claude --team my-project --agent-name db \
+  --task "实现 database 层。写完后运行 workflow review-code my-project 让 Cursor 审查"
+
+# 3. 看所有 agent 同时工作
+clawteam board attach my-project
+```
+
+每个 worker 在独立的 git worktree + tmux window 里工作，互不干扰。
+
 ## 审查者配置
 
 Cursor Agent 的模型和 prompt 在 `agents/cursor.md`，由 `/sparring:setup` 生成。
