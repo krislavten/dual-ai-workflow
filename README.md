@@ -100,11 +100,7 @@ ClawTeam 分 3 个任务并行
 ### 安装 ClawTeam
 
 ```bash
-# 官方版
 pipx install clawteam
-
-# Bedrock 适配版（推荐，修复了 Bedrock Claude Code 的启动等待问题）
-pipx install git+https://github.com/krislavten/ClawTeam.git@fix/claude-bedrock-spawn-timing
 ```
 
 ### 使用

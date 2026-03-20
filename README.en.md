@@ -86,11 +86,7 @@ ClawTeam splits 3 tasks in parallel
 ### Install ClawTeam
 
 ```bash
-# Official
 pipx install clawteam
-
-# Bedrock-adapted (recommended — fixes startup timing for Bedrock Claude Code)
-pipx install git+https://github.com/krislavten/ClawTeam.git@fix/claude-bedrock-spawn-timing
 ```
 
 ### Usage
