@@ -164,8 +164,9 @@ update_meta() {
     shift
     # 最后一个参数是 jq 表达式，前面的都是 jq 选项（如 --arg）
     local args=("$@")
-    local jq_expr="${args[-1]}"
-    local jq_opts=("${args[@]:0:${#args[@]}-1}")
+    local last_idx=$(( ${#args[@]} - 1 ))
+    local jq_expr="${args[$last_idx]}"
+    local jq_opts=("${args[@]:0:$last_idx}")
     local tmp="${task_dir}/meta.json.tmp"
 
     if ! jq "${jq_opts[@]}" "$jq_expr" "${task_dir}/meta.json" > "$tmp"; then
