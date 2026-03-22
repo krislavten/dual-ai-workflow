@@ -105,6 +105,16 @@ Commit!
 - Respond with `APPROVE` or `CONCERNS: <list>`
 - Don't involve user
 
+### Handling CONCERNS (Executor's responsibility)
+
+**Reviewer 说 CONCERNS 不等于都要改。** 收到 CONCERNS 后对每条独立判断：
+
+- **Accept & Fix** — 真正的 bug、安全漏洞 → 修复后 re-review
+- **Accept & Defer** — 合理但不阻塞当前任务 → 回复理由，不改
+- **Reject** — 过度设计、假设性场景、远期优化 → 回复理由，不改
+
+Re-review 时说明每条处置（fixed / deferred / rejected + 理由），让 reviewer 重新评估。
+
 ## Key Differences from Normal Mode
 
 | Aspect | Normal Mode | YOLO Mode |
