@@ -222,9 +222,25 @@ test_create_task_cursor_executor() {
     executor=$(jq -r '.executor' "$task_dir/meta.json")
     reviewer=$(jq -r '.reviewer' "$task_dir/meta.json")
     assert_eq "executor is cursor" "cursor" "$executor"
-    assert_eq "reviewer is claude" "claude" "$reviewer"
+    assert_eq "reviewer follows default backend(cursor)" "cursor" "$reviewer"
 }
 test_create_task_cursor_executor
+
+test_create_task_codex_backend() {
+    source_workflow_funcs
+    check_agent() { return 0; }
+    init_agent_session() { return 0; }
+
+    WORKFLOW_REVIEW_BACKEND=codex create_task "codex-task" "claude" > /dev/null 2>&1
+
+    local task_dir
+    task_dir=$(ls -d "$PLANS_DIR"/*-codex-task 2>/dev/null | head -1)
+
+    local reviewer
+    reviewer=$(jq -r '.reviewer' "$task_dir/meta.json")
+    assert_eq "reviewer follows codex backend" "codex" "$reviewer"
+}
+test_create_task_codex_backend
 
 echo ""
 echo "=== validate_task_name ==="
@@ -284,6 +300,34 @@ test_no_project_graceful() {
 test_no_project_graceful
 
 echo ""
+echo "=== review backend ==="
+
+test_review_backend_default() {
+    source_workflow_funcs
+    unset WORKFLOW_REVIEW_BACKEND
+    local backend
+    backend=$(get_review_backend)
+    assert_eq "default review backend" "cursor" "$backend"
+}
+test_review_backend_default
+
+test_review_backend_codex() {
+    source_workflow_funcs
+    local backend
+    backend=$(WORKFLOW_REVIEW_BACKEND=codex get_review_backend)
+    assert_eq "codex review backend" "codex" "$backend"
+}
+test_review_backend_codex
+
+test_review_backend_invalid() {
+    source_workflow_funcs
+    local status=0
+    WORKFLOW_REVIEW_BACKEND=foo get_review_backend 2>/dev/null || status=$?
+    assert_eq "invalid backend fails" "1" "$status"
+}
+test_review_backend_invalid
+
+echo ""
 echo "=== commands/ frontmatter ==="
 
 test_commands_frontmatter() {
@@ -309,6 +353,8 @@ test_help_runs() {
     output=$(bash "$WORKFLOW" help 2>&1)
     assert_contains "help shows setup" "setup" "$output"
     assert_contains "help shows workflow commands" "review-proposal" "$output"
+    assert_contains "help shows background review command" "review-proposal-bg" "$output"
+    assert_contains "help shows review job status command" "review-status" "$output"
     assert_contains "help shows issue commands" "issue-poll" "$output"
 }
 test_help_runs

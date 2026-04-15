@@ -34,6 +34,41 @@ ISSUE_POLL_INTERVAL="${WORKFLOW_POLL_INTERVAL:-30}"
 ISSUE_LABEL="${WORKFLOW_ISSUE_LABEL:-claude-ok}"
 ISSUE_PROJECT_NUMBER="${WORKFLOW_PROJECT_NUMBER:-}"
 ISSUE_PROJECT_OWNER="${WORKFLOW_PROJECT_OWNER:-}"
+REVIEW_BACKEND_DEFAULT="cursor"
+
+# ─── Reviewer Backend 配置 ───────────────────────────────────
+
+get_review_backend() {
+    local backend="${WORKFLOW_REVIEW_BACKEND:-$REVIEW_BACKEND_DEFAULT}"
+    backend=$(printf '%s' "$backend" | tr '[:upper:]' '[:lower:]')
+
+    case "$backend" in
+        cursor|codex) echo "$backend" ;;
+        *)
+            echo -e "${RED}错误: WORKFLOW_REVIEW_BACKEND 仅支持 cursor 或 codex${NC}" >&2
+            echo "  收到: '${backend}'" >&2
+            return 1
+            ;;
+    esac
+}
+
+reviewer_name_for_backend() {
+    local backend="$1"
+    case "$backend" in
+        cursor) echo "cursor" ;;
+        codex)  echo "codex" ;;
+        *)      echo "$backend" ;;
+    esac
+}
+
+reviewer_label_for_backend() {
+    local backend="$1"
+    case "$backend" in
+        cursor) echo "Cursor Agent" ;;
+        codex)  echo "Codex CLI" ;;
+        *)      echo "$backend" ;;
+    esac
+}
 
 # ─── Project 链接解析 ────────────────────────────────────────
 
@@ -91,6 +126,14 @@ check_agent() {
     fi
 }
 
+check_codex() {
+    if ! command -v codex &>/dev/null; then
+        echo -e "${RED}错误: 未找到 codex 命令${NC}" >&2
+        echo "  请安装: npm install -g @openai/codex" >&2
+        return 1
+    fi
+}
+
 # ─── 项目根目录查找（向上查找 .workflow 或 .git） ──────────
 
 find_project_root() {
@@ -112,6 +155,7 @@ find_project_root() {
 PROJECT_ROOT="$(find_project_root)"
 WORKFLOW_DIR="${PROJECT_ROOT}/.workflow"
 PLANS_DIR="${WORKFLOW_DIR}/plans"
+REVIEW_JOBS_DIR="${WORKFLOW_DIR}/review-jobs"
 
 # ─── 输入验证 ───────────────────────────────────────────────
 
@@ -166,15 +210,354 @@ update_meta() {
     local args=("$@")
     local last_idx=$(( ${#args[@]} - 1 ))
     local jq_expr="${args[$last_idx]}"
-    local jq_opts=("${args[@]:0:$last_idx}")
+    local -a jq_opts=()
+    if [[ $last_idx -gt 0 ]]; then
+        jq_opts=("${args[@]:0:$last_idx}")
+    fi
     local tmp="${task_dir}/meta.json.tmp"
 
-    if ! jq "${jq_opts[@]}" "$jq_expr" "${task_dir}/meta.json" > "$tmp"; then
+    local jq_status=0
+    if [[ ${#jq_opts[@]} -gt 0 ]]; then
+        jq "${jq_opts[@]}" "$jq_expr" "${task_dir}/meta.json" > "$tmp" || jq_status=$?
+    else
+        jq "$jq_expr" "${task_dir}/meta.json" > "$tmp" || jq_status=$?
+    fi
+
+    if [[ $jq_status -ne 0 ]]; then
         rm -f "$tmp"
         echo -e "${RED}错误: JSON 更新失败${NC}"
         return 1
     fi
     mv -f "$tmp" "${task_dir}/meta.json"
+}
+
+# ─── 后台 Review 作业管理 ─────────────────────────────────────
+
+ensure_review_jobs_dir() {
+    mkdir -p "${REVIEW_JOBS_DIR}"
+}
+
+generate_review_job_id() {
+    printf 'rj-%s-%04x' "$(date +%Y%m%d%H%M%S)" "$((RANDOM % 65536))"
+}
+
+review_job_file_path() {
+    local job_id="$1"
+    echo "${REVIEW_JOBS_DIR}/${job_id}.json"
+}
+
+review_job_log_path() {
+    local job_id="$1"
+    echo "${REVIEW_JOBS_DIR}/${job_id}.log"
+}
+
+review_job_result_path() {
+    local job_id="$1"
+    echo "${REVIEW_JOBS_DIR}/${job_id}.result.md"
+}
+
+review_job_update() {
+    local job_file="$1"
+    shift
+
+    if [[ ! -f "$job_file" ]]; then
+        echo -e "${RED}错误: review job 不存在: ${job_file}${NC}" >&2
+        return 1
+    fi
+
+    local args=("$@")
+    local last_idx=$(( ${#args[@]} - 1 ))
+    local jq_expr="${args[$last_idx]}"
+    local -a jq_opts=()
+    if [[ $last_idx -gt 0 ]]; then
+        jq_opts=("${args[@]:0:$last_idx}")
+    fi
+
+    local tmp="${job_file}.tmp"
+    local jq_status=0
+    if [[ ${#jq_opts[@]} -gt 0 ]]; then
+        jq "${jq_opts[@]}" "$jq_expr" "$job_file" > "$tmp" || jq_status=$?
+    else
+        jq "$jq_expr" "$job_file" > "$tmp" || jq_status=$?
+    fi
+
+    if [[ $jq_status -ne 0 ]]; then
+        rm -f "$tmp"
+        echo -e "${RED}错误: review job JSON 更新失败${NC}" >&2
+        return 1
+    fi
+    mv -f "$tmp" "$job_file"
+}
+
+start_background_review() {
+    local review_type="$1"
+    local task_id="$2"
+
+    validate_task_exists "$task_id"
+    [[ "$review_type" != "proposal" && "$review_type" != "code" ]] && {
+        echo -e "${RED}错误: review_type 必须是 proposal 或 code${NC}"
+        return 1
+    }
+
+    ensure_review_jobs_dir
+    local backend
+    backend=$(get_review_backend) || return 1
+
+    local job_id
+    job_id=$(generate_review_job_id)
+    local job_file
+    job_file=$(review_job_file_path "$job_id")
+    local log_file
+    log_file=$(review_job_log_path "$job_id")
+    local result_file
+    result_file=$(review_job_result_path "$job_id")
+
+    jq -n \
+        --arg job_id "$job_id" \
+        --arg task_id "$task_id" \
+        --arg review_type "$review_type" \
+        --arg backend "$backend" \
+        --arg ts "$(date -Iseconds)" \
+        --arg log_file "$log_file" \
+        --arg result_file "$result_file" \
+        '{
+            job_id: $job_id,
+            task_id: $task_id,
+            review_type: $review_type,
+            backend: $backend,
+            status: "queued",
+            created_at: $ts,
+            started_at: null,
+            completed_at: null,
+            pid: null,
+            exit_code: null,
+            review_state: null,
+            review_file: null,
+            result_file: $result_file,
+            log_file: $log_file
+        }' > "$job_file"
+
+    : > "$log_file"
+
+    local script_path
+    script_path="$(_resolve_script_dir)/bin/workflow"
+    nohup bash "$script_path" __review-worker "$review_type" "$task_id" "$job_id" >> "$log_file" 2>&1 &
+    local pid=$!
+
+    review_job_update "$job_file" \
+        --argjson pid "$pid" \
+        '.pid = $pid'
+
+    echo -e "${GREEN}✓ 后台 review 已启动: ${job_id}${NC}"
+    echo -e "${BLUE}  类型: ${review_type}  任务: ${task_id}  backend: ${backend}${NC}"
+    echo "  状态查看: workflow review-status ${job_id}"
+    echo "  查看结果: workflow review-result ${job_id}"
+    echo "  取消任务: workflow review-cancel ${job_id}"
+}
+
+run_review_worker() {
+    local review_type="$1"
+    local task_id="$2"
+    local job_id="$3"
+
+    validate_task_exists "$task_id"
+
+    local job_file
+    job_file=$(review_job_file_path "$job_id")
+    local log_file
+    log_file=$(review_job_log_path "$job_id")
+    local result_file
+    result_file=$(review_job_result_path "$job_id")
+
+    local ts
+    ts="$(date -Iseconds)"
+    review_job_update "$job_file" \
+        --arg ts "$ts" \
+        --argjson pid "$$" \
+        '.status = "running" | .started_at = $ts | .pid = $pid'
+
+    local task_dir="${PLANS_DIR}/${task_id}"
+    local review_pattern review_step
+    if [[ "$review_type" == "proposal" ]]; then
+        review_pattern="proposal-review-*.md"
+        review_step="proposal_review"
+    else
+        review_pattern="code-review-*.md"
+        review_step="code_review"
+    fi
+
+    local before_count after_count
+    before_count=$(find "${task_dir}" -name "$review_pattern" 2>/dev/null | wc -l | tr -d ' ')
+
+    local rc
+    set +e
+    if [[ "$review_type" == "proposal" ]]; then
+        review_proposal "$task_id"
+    else
+        review_code "$task_id"
+    fi
+    rc=$?
+    set -e
+
+    after_count=$(find "${task_dir}" -name "$review_pattern" 2>/dev/null | wc -l | tr -d ' ')
+    local latest_review_file=""
+    if [[ "$after_count" -gt "$before_count" ]]; then
+        latest_review_file=$(find "${task_dir}" -name "$review_pattern" -print | sort | tail -1)
+    else
+        latest_review_file=$(find "${task_dir}" -name "$review_pattern" -print | sort | tail -1)
+    fi
+
+    if [[ -n "$latest_review_file" && -f "$latest_review_file" ]]; then
+        cp "$latest_review_file" "$result_file"
+    fi
+
+    local review_state
+    review_state=$(jq -r --arg step "$review_step" '.steps[$step] // empty' "${task_dir}/meta.json")
+    local status="completed"
+    [[ $rc -ne 0 ]] && status="failed"
+
+    ts="$(date -Iseconds)"
+    review_job_update "$job_file" \
+        --arg status "$status" \
+        --arg ts "$ts" \
+        --argjson rc "$rc" \
+        --arg review_state "$review_state" \
+        --arg review_file "$latest_review_file" \
+        --arg result_file "$result_file" \
+        '.status = $status
+         | .completed_at = $ts
+         | .pid = null
+         | .exit_code = $rc
+         | .review_state = $review_state
+         | .review_file = (if $review_file == "" then null else $review_file end)
+         | .result_file = $result_file'
+
+    if [[ "$status" == "completed" ]]; then
+        echo -e "${GREEN}✓ 后台 review 完成: ${job_id}${NC}" >> "$log_file"
+    else
+        echo -e "${RED}✗ 后台 review 失败: ${job_id}${NC}" >> "$log_file"
+    fi
+
+    return 0
+}
+
+show_review_status() {
+    ensure_review_jobs_dir
+    local ref="${1:-}"
+
+    if [[ -n "$ref" && -f "$(review_job_file_path "$ref")" ]]; then
+        local job_file
+        job_file=$(review_job_file_path "$ref")
+        echo -e "${BLUE}=== Review Job: ${ref} ===${NC}"
+        jq '.' "$job_file"
+        local log_file
+        log_file=$(jq -r '.log_file // empty' "$job_file")
+        if [[ -n "$log_file" && -f "$log_file" ]]; then
+            echo ""
+            echo -e "${BLUE}最近日志:${NC}"
+            tail -n 20 "$log_file"
+        fi
+        return 0
+    fi
+
+    local files=("${REVIEW_JOBS_DIR}"/*.json)
+    if [[ ${#files[@]} -eq 0 || ! -e "${files[0]}" ]]; then
+        echo "暂无后台 review 作业"
+        return 0
+    fi
+
+    echo -e "${BLUE}=== Review Jobs ===${NC}"
+    printf "%-24s %-10s %-9s %-8s %-28s\n" "JOB_ID" "STATUS" "TYPE" "BACKEND" "TASK_ID"
+    for job_file in "${files[@]}"; do
+        local job_id status review_type backend task_id
+        job_id=$(jq -r '.job_id' "$job_file")
+        status=$(jq -r '.status' "$job_file")
+        review_type=$(jq -r '.review_type' "$job_file")
+        backend=$(jq -r '.backend' "$job_file")
+        task_id=$(jq -r '.task_id' "$job_file")
+
+        if [[ -n "$ref" && "$task_id" != "$ref" ]]; then
+            continue
+        fi
+        printf "%-24s %-10s %-9s %-8s %-28s\n" "$job_id" "$status" "$review_type" "$backend" "$task_id"
+    done
+}
+
+show_review_result() {
+    local job_id="${1:-}"
+    if [[ -z "$job_id" ]]; then
+        echo -e "${RED}错误: 请提供 job-id${NC}"
+        echo "用法: workflow review-result <job-id>"
+        return 1
+    fi
+
+    local job_file
+    job_file=$(review_job_file_path "$job_id")
+    if [[ ! -f "$job_file" ]]; then
+        echo -e "${RED}错误: review job 不存在: ${job_id}${NC}"
+        return 1
+    fi
+
+    local status result_file review_file
+    status=$(jq -r '.status' "$job_file")
+    result_file=$(jq -r '.result_file // empty' "$job_file")
+    review_file=$(jq -r '.review_file // empty' "$job_file")
+
+    if [[ "$status" == "queued" || "$status" == "running" ]]; then
+        echo -e "${YELLOW}作业尚未完成: ${job_id} (${status})${NC}"
+        echo "查看状态: workflow review-status ${job_id}"
+        return 0
+    fi
+
+    if [[ -n "$result_file" && -f "$result_file" ]]; then
+        cat "$result_file"
+        return 0
+    fi
+
+    if [[ -n "$review_file" && -f "$review_file" ]]; then
+        cat "$review_file"
+        return 0
+    fi
+
+    echo -e "${YELLOW}未找到 review 结果文件${NC}"
+    echo "查看详情: workflow review-status ${job_id}"
+}
+
+cancel_review_job() {
+    local job_id="${1:-}"
+    if [[ -z "$job_id" ]]; then
+        echo -e "${RED}错误: 请提供 job-id${NC}"
+        echo "用法: workflow review-cancel <job-id>"
+        return 1
+    fi
+
+    local job_file
+    job_file=$(review_job_file_path "$job_id")
+    if [[ ! -f "$job_file" ]]; then
+        echo -e "${RED}错误: review job 不存在: ${job_id}${NC}"
+        return 1
+    fi
+
+    local status pid
+    status=$(jq -r '.status' "$job_file")
+    pid=$(jq -r '.pid // empty' "$job_file")
+
+    if [[ "$status" != "queued" && "$status" != "running" ]]; then
+        echo -e "${YELLOW}作业不是运行态，无需取消: ${job_id} (${status})${NC}"
+        return 0
+    fi
+
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+    fi
+
+    local ts
+    ts="$(date -Iseconds)"
+    review_job_update "$job_file" \
+        --arg ts "$ts" \
+        '.status = "cancelled" | .completed_at = $ts | .pid = null'
+
+    echo -e "${GREEN}✓ 已取消 review job: ${job_id}${NC}"
 }
 
 # ─── Issue 同步 ──────────────────────────────────────────────
@@ -198,6 +581,7 @@ sync_to_issue() {
     case "$agent_name" in
         *Claude*|*claude*) icon="🧠" ;;
         *Cursor*|*cursor*) icon="🤖" ;;
+        *Codex*|*codex*)   icon="🧪" ;;
         *)                 icon="🔧" ;;
     esac
 
@@ -282,6 +666,11 @@ _timeout_cmd() {
 # 为任务初始化 cursor agent session（创建 chat 并存到 meta.json）
 init_agent_session() {
     local task_dir="$1"
+    local backend
+    backend=$(get_review_backend) || return 1
+
+    # codex backend 不需要 cursor chat session
+    [[ "$backend" != "cursor" ]] && return 0
 
     check_agent || return 1
 
@@ -296,7 +685,7 @@ init_agent_session() {
     fi
 }
 
-call_agent() {
+call_cursor_agent() {
     local prompt="$1"
     local task_dir="${2:-}"
     local max_retries=3
@@ -351,10 +740,121 @@ ${prompt}"
     echo "$result"
 }
 
+call_codex_agent() {
+    local prompt="$1"
+    local max_retries=3
+    local result=""
+
+    check_codex
+
+    local model="${WORKFLOW_CODEX_MODEL:-}"
+    local effort="${WORKFLOW_CODEX_EFFORT:-}"
+    local codex_home="${WORKFLOW_CODEX_HOME:-${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}}"
+    mkdir -p "$codex_home"
+
+    local output_file
+    output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-codex-out.XXXXXX")
+    local prompt_file
+    prompt_file=$(mktemp "${TMPDIR:-/tmp}/workflow-codex-prompt.XXXXXX")
+    local command_output_file
+    command_output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-codex-log.XXXXXX")
+
+    cat > "$prompt_file" <<EOF
+你在 Dual AI Workflow 中担任严格 reviewer。
+
+响应格式必须严格二选一：
+1) 通过时：
+APPROVE
+
+[1-2 句理由]
+
+2) 有问题时：
+CONCERNS
+
+1. [问题 + 影响 + 修复建议]
+2. ...
+
+始终用中文，且不要输出其他格式。
+
+${prompt}
+EOF
+
+    local codex_cmd=(codex exec --sandbox read-only --ephemeral --skip-git-repo-check --color never --output-last-message "$output_file")
+    if [[ -n "$model" ]]; then
+        codex_cmd+=(--model "$model")
+    fi
+    if [[ -n "$effort" ]]; then
+        codex_cmd+=(-c "model_reasoning_effort=\"$effort\"")
+    fi
+    codex_cmd+=(-)
+
+    local model_desc="${model:-default(config.toml)}"
+    local effort_desc="${effort:-default(config.toml)}"
+    echo -e "${DIM}  使用 Codex CLI | 模型: ${model_desc} | 推理: ${effort_desc}${NC}" >&2
+    echo -e "${DIM}  CODEX_HOME: ${codex_home}${NC}" >&2
+
+    for i in $(seq 1 $max_retries); do
+        if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd "${AGENT_TIMEOUT}" \
+            "${codex_cmd[@]}" < "$prompt_file" > "$command_output_file" 2>&1; then
+            break
+        fi
+
+        if [[ $i -lt $max_retries ]]; then
+            echo -e "${DIM}  codex 调用失败，重试 ($i/$max_retries)...${NC}" >&2
+            sleep 2
+        else
+            local err_output
+            err_output=$(cat "$command_output_file" 2>/dev/null || true)
+            rm -f "$output_file" "$prompt_file" "$command_output_file"
+            echo -e "${RED}错误: codex 调用失败 ($max_retries 次重试后)${NC}" >&2
+            echo -e "${DIM}  错误信息: $err_output${NC}" >&2
+            echo ""
+            return 1
+        fi
+    done
+
+    if [[ -s "$output_file" ]]; then
+        result=$(cat "$output_file")
+    else
+        result=$(cat "$command_output_file" 2>/dev/null || true)
+    fi
+
+    # 忽略 codex CLI 的 PATH 警告噪音
+    result=$(echo "$result" | sed '/^WARNING: proceeding, even though we could not update PATH:/d')
+
+    rm -f "$output_file" "$prompt_file" "$command_output_file"
+
+    if [[ -z "${result//[[:space:]]/}" ]]; then
+        echo -e "${RED}错误: codex 返回空结果${NC}" >&2
+        return 1
+    fi
+
+    echo "$result"
+}
+
+call_reviewer() {
+    local prompt="$1"
+    local task_dir="${2:-}"
+    local backend
+    backend=$(get_review_backend) || return 1
+
+    case "$backend" in
+        cursor) call_cursor_agent "$prompt" "$task_dir" ;;
+        codex)  call_codex_agent "$prompt" "$task_dir" ;;
+        *)      echo -e "${RED}错误: 不支持的 reviewer backend: ${backend}${NC}" >&2; return 1 ;;
+    esac
+}
+
+# backward compatibility: keep old function name
+call_agent() {
+    call_reviewer "$@"
+}
+
 # ─── 初始化 ─────────────────────────────────────────────────
 
 init_workflow() {
     mkdir -p "${PLANS_DIR}"
+    mkdir -p "${REVIEW_JOBS_DIR}"
 
     cat > "${WORKFLOW_DIR}/.gitignore" <<'EOF'
 *
@@ -391,8 +891,10 @@ create_task() {
         init_workflow
     fi
 
+    local backend
+    backend=$(get_review_backend) || exit 1
     local reviewer
-    [[ "$executor" == "claude" ]] && reviewer="cursor" || reviewer="claude"
+    reviewer=$(reviewer_name_for_backend "$backend")
     local task_id
     task_id="$(date +%Y%m%d-%H%M%S)-${task_name}"
     local task_dir="${PLANS_DIR}/${task_id}"
@@ -444,6 +946,7 @@ EOF
     echo -e "${GREEN}✓ 任务创建成功: ${task_id}${NC}"
     echo -e "${BLUE}任务目录: ${task_dir}${NC}"
     echo -e "${YELLOW}执行者: ${executor}  观察者: ${reviewer}${NC}"
+    echo -e "${DIM}审查后端: ${backend}${NC}"
     echo ""
     echo "下一步:"
     echo "  1. 编辑任务描述: ${task_dir}/task.md"
@@ -474,24 +977,39 @@ propose() {
 
 # ─── 自动 Review 方案 ────────────────────────────────────────
 
+review_proposal_bg() {
+    local task_id="${1:-}"
+    if [[ -z "$task_id" ]]; then
+        echo -e "${RED}错误: 请提供 task-id${NC}"
+        echo "用法: workflow review-proposal-bg <task-id>"
+        return 1
+    fi
+    start_background_review "proposal" "$task_id"
+}
+
 review_proposal() {
     local task_id="${1:-}"
     validate_task_exists "$task_id"
     local task_dir="${PLANS_DIR}/${task_id}"
+    local backend
+    backend=$(get_review_backend) || return 1
 
     if [[ ! -f "${task_dir}/proposal.md" ]]; then
         echo -e "${RED}错误: 方案文件不存在，请先编写 ${task_dir}/proposal.md${NC}"
-        exit 1
+        return 1
     fi
 
     local reviewer
     reviewer=$(jq -r '.reviewer' "${task_dir}/meta.json")
+    [[ -z "$reviewer" || "$reviewer" == "null" ]] && reviewer=$(reviewer_name_for_backend "$backend")
+    local reviewer_label
+    reviewer_label=$(reviewer_label_for_backend "$backend")
     local review_count
     review_count=$(find "${task_dir}" -name "proposal-review-*.md" 2>/dev/null | wc -l)
     local review_num=$((review_count + 1))
 
     echo -e "${BLUE}=== 方案 Review (第 ${review_num} 轮) ===${NC}"
-    echo -e "${YELLOW}观察者: ${reviewer}${NC}"
+    echo -e "${YELLOW}观察者: ${reviewer_label}${NC}"
     echo ""
 
     local proposal_content
@@ -511,10 +1029,10 @@ ${proposal_content}
 重点: 架构合理性、可行性、边界情况、安全性。
 只提真正有问题的点，不要提远期优化建议或假设性场景防御。请用中文简洁回复。"
 
-    echo -e "${DIM}正在调用 ${reviewer} agent review...${NC}"
+    echo -e "${DIM}正在调用 ${reviewer_label} (${backend} backend) review...${NC}"
 
     local review_result
-    if review_result=$(call_agent "$prompt" "$task_dir"); then
+    if review_result=$(call_reviewer "$prompt" "$task_dir"); then
         echo "$review_result" > "${task_dir}/proposal-review-${review_num}.md"
         echo ""
         echo -e "${GREEN}Review 结果:${NC}"
@@ -524,14 +1042,14 @@ ${proposal_content}
         if echo "$review_result" | grep -qi "APPROVE"; then
             echo -e "${GREEN}✓ 方案 Review 通过！${NC}"
             update_meta "$task_dir" '.steps.proposal_review = "approved"'
-            sync_to_issue "$task_dir" "Cursor Agent" "Proposal Review #${review_num} — APPROVED" "$review_result"
+            sync_to_issue "$task_dir" "${reviewer_label}" "Proposal Review #${review_num} — APPROVED" "$review_result"
         else
             echo -e "${YELLOW}⚠ 有修改意见，请执行者处理后重新 review${NC}"
             update_meta "$task_dir" '.steps.proposal_review = "needs_revision"'
-            sync_to_issue "$task_dir" "Cursor Agent" "Proposal Review #${review_num} — NEEDS REVISION" "$review_result"
+            sync_to_issue "$task_dir" "${reviewer_label}" "Proposal Review #${review_num} — NEEDS REVISION" "$review_result"
         fi
     else
-        echo -e "${YELLOW}⚠ Agent 调用失败，降级为手动 review${NC}"
+        echo -e "${YELLOW}⚠ ${reviewer_label} 调用失败，降级为手动 review${NC}"
         echo ""
         echo "请手动 review: ${task_dir}/proposal.md"
         echo "并将结果保存到: ${task_dir}/proposal-review-${review_num}.md"
@@ -585,19 +1103,34 @@ implement() {
 
 # ─── 自动 Review 代码 ────────────────────────────────────────
 
+review_code_bg() {
+    local task_id="${1:-}"
+    if [[ -z "$task_id" ]]; then
+        echo -e "${RED}错误: 请提供 task-id${NC}"
+        echo "用法: workflow review-code-bg <task-id>"
+        return 1
+    fi
+    start_background_review "code" "$task_id"
+}
+
 review_code() {
     local task_id="${1:-}"
     validate_task_exists "$task_id"
     local task_dir="${PLANS_DIR}/${task_id}"
+    local backend
+    backend=$(get_review_backend) || return 1
 
     local reviewer
     reviewer=$(jq -r '.reviewer' "${task_dir}/meta.json")
+    [[ -z "$reviewer" || "$reviewer" == "null" ]] && reviewer=$(reviewer_name_for_backend "$backend")
+    local reviewer_label
+    reviewer_label=$(reviewer_label_for_backend "$backend")
     local review_count
     review_count=$(find "${task_dir}" -name "code-review-*.md" 2>/dev/null | wc -l)
     local review_num=$((review_count + 1))
 
     echo -e "${BLUE}=== 代码 Review (第 ${review_num} 轮) ===${NC}"
-    echo -e "${YELLOW}观察者: ${reviewer}${NC}"
+    echo -e "${YELLOW}观察者: ${reviewer_label}${NC}"
     echo ""
 
     local diff_content=""
@@ -627,10 +1160,10 @@ ${diff_content}
 重点: 正确性、安全性、边界 case、测试覆盖。
 只提真正有问题的点，不要提远期优化建议或假设性场景防御。请用中文简洁回复。"
 
-    echo -e "${DIM}正在调用 ${reviewer} agent review...${NC}"
+    echo -e "${DIM}正在调用 ${reviewer_label} (${backend} backend) review...${NC}"
 
     local review_result
-    if review_result=$(call_agent "$prompt" "$task_dir"); then
+    if review_result=$(call_reviewer "$prompt" "$task_dir"); then
         echo "$review_result" > "${task_dir}/code-review-${review_num}.md"
         echo ""
         echo -e "${GREEN}Code Review 结果:${NC}"
@@ -640,14 +1173,14 @@ ${diff_content}
         if echo "$review_result" | grep -qi "APPROVE"; then
             echo -e "${GREEN}✓ 代码 Review 通过！${NC}"
             update_meta "$task_dir" '.steps.code_review = "approved"'
-            sync_to_issue "$task_dir" "Cursor Agent" "Code Review #${review_num} — APPROVED" "$review_result"
+            sync_to_issue "$task_dir" "${reviewer_label}" "Code Review #${review_num} — APPROVED" "$review_result"
         else
             echo -e "${YELLOW}⚠ 有修改意见，请执行者修复后重新 review${NC}"
             update_meta "$task_dir" '.steps.code_review = "needs_revision"'
-            sync_to_issue "$task_dir" "Cursor Agent" "Code Review #${review_num} — NEEDS REVISION" "$review_result"
+            sync_to_issue "$task_dir" "${reviewer_label}" "Code Review #${review_num} — NEEDS REVISION" "$review_result"
         fi
     else
-        echo -e "${YELLOW}⚠ Agent 调用失败，降级为手动 review${NC}"
+        echo -e "${YELLOW}⚠ ${reviewer_label} 调用失败，降级为手动 review${NC}"
         echo ""
         echo "请手动 review 代码改动"
         echo "并将结果保存到: ${task_dir}/code-review-${review_num}.md"
@@ -914,6 +1447,13 @@ issue_claim() {
         return 1
     fi
 
+    local backend
+    backend=$(get_review_backend) || return 1
+    local reviewer
+    reviewer=$(reviewer_name_for_backend "$backend")
+    local reviewer_label
+    reviewer_label=$(reviewer_label_for_backend "$backend")
+
     local repo
     repo=$(detect_repo) || return 1
 
@@ -957,6 +1497,7 @@ issue_claim() {
     local claim_body="🤖 **Claude Code 已认领此任务**
 
 - 模式: $([ "$mode" = "yolo" ] && echo "🚀 YOLO (全自动)" || echo "👥 Normal (协作式)")
+- 审查后端: ${reviewer_label}
 - 开始时间: $(date '+%Y-%m-%d %H:%M')
 
 正在分析 issue 内容..."
@@ -994,13 +1535,14 @@ issue_claim() {
         --arg name "$task_name" \
         --arg ts "$(date -Iseconds)" \
         --arg mode "$mode" \
+        --arg reviewer "$reviewer" \
         --argjson issue_number "$issue_number" \
         --arg repo "$repo" \
         '{
             task_id: $id,
             task_name: $name,
             executor: "claude",
-            reviewer: "cursor",
+            reviewer: $reviewer,
             mode: $mode,
             status: "proposal",
             issue_number: $issue_number,
@@ -1023,7 +1565,7 @@ ${body}
 
 ---
 **执行者**: claude
-**观察者**: cursor
+**观察者**: ${reviewer_label}
 **模式**: ${mode}
 **Issue**: https://github.com/${repo}/issues/${issue_number}
 EOF
@@ -1260,6 +1802,11 @@ verify() {
     echo ""
 
     local ok=true
+    local backend
+    backend=$(get_review_backend) || return 1
+
+    echo -n "review backend: "
+    echo -e "${GREEN}${backend}${NC}"
 
     echo -n "jq: "
     if command -v jq &>/dev/null; then
@@ -1269,36 +1816,101 @@ verify() {
         ok=false
     fi
 
-    echo -n "agent (Cursor CLI): "
-    if command -v agent &>/dev/null; then
-        echo -e "${GREEN}✓ $(agent --version 2>/dev/null || echo 'installed')${NC}"
-    else
-        echo -e "${RED}✗ 未安装${NC}"
-        ok=false
-    fi
-
-    load_agent_config "cursor"
-    local verify_model="${WORKFLOW_AGENT_MODEL:-$AGENT_MODEL}"
-    echo -e "  配置文件: ${AGENTS_DIR}/cursor.md"
-    echo -e "  模型: ${verify_model}"
-    if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
-        echo -e "  System prompt: $(echo "$AGENT_SYSTEM_PROMPT" | wc -l | tr -d ' ') 行"
-    else
-        echo -e "  System prompt: (无)"
-    fi
-    echo ""
-
-    echo -n "agent 连通性: "
-    if result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd 15 agent --print --trust --model "$verify_model" "Reply with only: OK" 2>&1); then
-        if echo "$result" | grep -qi "OK"; then
-            echo -e "${GREEN}✓ 正常${NC}"
+    if [[ "$backend" == "cursor" ]]; then
+        echo -n "agent (Cursor CLI): "
+        if command -v agent &>/dev/null; then
+            echo -e "${GREEN}✓ $(agent --version 2>/dev/null || echo 'installed')${NC}"
         else
-            echo -e "${YELLOW}? 有响应但内容异常: ${result:0:50}${NC}"
+            echo -e "${RED}✗ 未安装${NC}"
+            ok=false
+        fi
+
+        load_agent_config "cursor"
+        local verify_model="${WORKFLOW_AGENT_MODEL:-$AGENT_MODEL}"
+        echo -e "  配置文件: ${AGENTS_DIR}/cursor.md"
+        echo -e "  模型: ${verify_model}"
+        if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
+            echo -e "  System prompt: $(echo "$AGENT_SYSTEM_PROMPT" | wc -l | tr -d ' ') 行"
+        else
+            echo -e "  System prompt: (无)"
+        fi
+        echo ""
+
+        echo -n "agent 连通性: "
+        local result
+        if result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd 15 agent --print --trust --model "$verify_model" "Reply with only: OK" 2>&1); then
+            if echo "$result" | grep -qi "OK"; then
+                echo -e "${GREEN}✓ 正常${NC}"
+            else
+                echo -e "${YELLOW}? 有响应但内容异常: ${result:0:50}${NC}"
+            fi
+        else
+            echo -e "${RED}✗ 连接失败${NC}"
+            echo -e "${DIM}  提示: 检查网络和代理配置，确认 HTTP_PROXY/HTTPS_PROXY 未指向不可用地址${NC}"
+            ok=false
         fi
     else
-        echo -e "${RED}✗ 连接失败${NC}"
-        echo -e "${DIM}  提示: 检查网络和代理配置，确认 HTTP_PROXY/HTTPS_PROXY 未指向不可用地址${NC}"
-        ok=false
+        echo -n "codex CLI: "
+        if command -v codex &>/dev/null; then
+            echo -e "${GREEN}✓ $(codex --version 2>/dev/null | head -1)${NC}"
+        else
+            echo -e "${RED}✗ 未安装${NC}"
+            ok=false
+        fi
+
+        local codex_model="${WORKFLOW_CODEX_MODEL:-}"
+        local codex_effort="${WORKFLOW_CODEX_EFFORT:-}"
+        local codex_home="${WORKFLOW_CODEX_HOME:-${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}}"
+        mkdir -p "$codex_home"
+        echo -e "  模型: ${codex_model:-default(config.toml)}"
+        echo -e "  推理: ${codex_effort:-default(config.toml)}"
+        echo -e "  CODEX_HOME: ${codex_home}"
+        echo ""
+
+        echo -n "codex 连通性: "
+        local codex_connect_ok=true
+        local output_file
+        output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-codex-out.XXXXXX")
+        local command_output_file
+        command_output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-codex-log.XXXXXX")
+
+        local codex_cmd=(codex exec --sandbox read-only --ephemeral --skip-git-repo-check --color never --output-last-message "$output_file")
+        if [[ -n "$codex_model" ]]; then
+            codex_cmd+=(--model "$codex_model")
+        fi
+        if [[ -n "$codex_effort" ]]; then
+            codex_cmd+=(-c "model_reasoning_effort=\"$codex_effort\"")
+        fi
+        codex_cmd+=("Reply with only: OK")
+
+        if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd 20 "${codex_cmd[@]}" < /dev/null > "$command_output_file" 2>&1; then
+            local codex_result
+            if [[ -s "$output_file" ]]; then
+                codex_result=$(cat "$output_file")
+            else
+                codex_result=$(cat "$command_output_file" 2>/dev/null || true)
+            fi
+            codex_result=$(echo "$codex_result" | sed '/^WARNING: proceeding, even though we could not update PATH:/d')
+
+            if echo "$codex_result" | grep -qi "OK"; then
+                echo -e "${GREEN}✓ 正常${NC}"
+            else
+                echo -e "${YELLOW}? 有响应但内容异常: ${codex_result:0:80}${NC}"
+            fi
+        else
+            codex_connect_ok=false
+        fi
+
+        if [[ "$codex_connect_ok" != "true" ]]; then
+            local codex_err
+            codex_err=$(cat "$command_output_file" 2>/dev/null || true)
+            echo -e "${RED}✗ 连接失败${NC}"
+            echo -e "${DIM}  错误: ${codex_err:0:120}${NC}"
+            echo -e "${DIM}  提示: 先执行 codex login，或检查 WORKFLOW_CODEX_MODEL / 网络配置${NC}"
+            ok=false
+        fi
+
+        rm -f "$output_file" "$command_output_file"
     fi
 
     echo -n "项目根目录: "
@@ -1347,12 +1959,18 @@ main() {
         create)              create_task "$@" ;;
         propose)             propose "$@" ;;
         review-proposal)     review_proposal "$@" ;;
+        review-proposal-bg)  review_proposal_bg "$@" ;;
         auto-review-proposal) auto_review_proposal "$@" ;;
         approve-proposal)    approve_proposal "$@" ;;
         implement)           implement "$@" ;;
         review-code)         review_code "$@" ;;
+        review-code-bg)      review_code_bg "$@" ;;
         auto-review-code)    auto_review_code "$@" ;;
         approve)             approve_final "$@" ;;
+        review-status)       show_review_status "$@" ;;
+        review-result)       show_review_result "$@" ;;
+        review-cancel)       cancel_review_job "$@" ;;
+        __review-worker)     run_review_worker "$@" ;;
         list)                list_tasks ;;
         status)              show_status "$@" ;;
         verify)              verify ;;
@@ -1371,7 +1989,7 @@ ${YELLOW}用法:${NC} workflow <command> [options]
 
 ${YELLOW}初始化:${NC}
   ${GREEN}setup${NC}                         交互式初始化 (选择模型、配置 Issue 模式)
-  ${GREEN}verify${NC}                        验证环境 (依赖、agent 连通性)
+  ${GREEN}verify${NC}                        验证环境 (依赖、review backend 连通性)
 
 ${YELLOW}任务管理:${NC}
   ${GREEN}init${NC}                          初始化工作流目录
@@ -1381,15 +1999,22 @@ ${YELLOW}任务管理:${NC}
 
 ${YELLOW}方案阶段:${NC}
   ${GREEN}propose${NC} <task-id>             执行者编写方案
-  ${GREEN}review-proposal${NC} <task-id>     自动调用 agent review 方案
+  ${GREEN}review-proposal${NC} <task-id>     自动调用 reviewer backend review 方案
+  ${GREEN}review-proposal-bg${NC} <task-id>  后台运行方案 review（返回 job-id）
   ${GREEN}auto-review-proposal${NC} <task-id> 自动 review 循环 (Skill 模式下最多 ${MAX_REVIEW_ROUNDS} 轮，CLI 下单轮)
   ${GREEN}approve-proposal${NC} <task-id>    批准方案
 
 ${YELLOW}实现阶段:${NC}
   ${GREEN}implement${NC} <task-id>           执行者实现代码
-  ${GREEN}review-code${NC} <task-id>         自动调用 agent review 代码
+  ${GREEN}review-code${NC} <task-id>         自动调用 reviewer backend review 代码
+  ${GREEN}review-code-bg${NC} <task-id>      后台运行代码 review（返回 job-id）
   ${GREEN}auto-review-code${NC} <task-id>    自动 review 循环 (Skill 模式下最多 ${MAX_REVIEW_ROUNDS} 轮，CLI 下单轮)
   ${GREEN}approve${NC} <task-id>             最终批准
+
+${YELLOW}后台 Review 作业:${NC}
+  ${GREEN}review-status${NC} [job-id|task-id] 查看后台 review 作业状态
+  ${GREEN}review-result${NC} <job-id>        查看后台 review 的最终结果
+  ${GREEN}review-cancel${NC} <job-id>        取消后台 review 作业
 
 ${YELLOW}GitHub Issue 集成:${NC}
   ${GREEN}issue-poll${NC}                    扫描带 ${ISSUE_LABEL} 标签的可认领 issue
@@ -1405,7 +2030,11 @@ ${YELLOW}全局选项:${NC}
                                 (例: https://github.com/orgs/xxx/projects/3)
 
 ${YELLOW}环境变量:${NC}
-  WORKFLOW_AGENT_MODEL    agent 使用的模型 (读取 agents/cursor.md)
+  WORKFLOW_REVIEW_BACKEND 审查后端: cursor|codex (默认: ${REVIEW_BACKEND_DEFAULT})
+  WORKFLOW_AGENT_MODEL    cursor backend 使用的模型 (读取 agents/cursor.md)
+  WORKFLOW_CODEX_MODEL    codex backend 使用的模型 (默认读取 codex config)
+  WORKFLOW_CODEX_EFFORT   codex backend 推理强度 (none|minimal|low|medium|high|xhigh)
+  WORKFLOW_CODEX_HOME     codex backend 的本地状态目录 (默认: /tmp/workflow-codex-home-<user>)
   WORKFLOW_POLL_INTERVAL  issue 轮询间隔秒数 (默认: ${ISSUE_POLL_INTERVAL})
   WORKFLOW_ISSUE_LABEL    issue 筛选标签 (默认: ${ISSUE_LABEL})
   WORKFLOW_PROJECT_NUMBER project 编号 (环境变量或 --project)
