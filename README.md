@@ -20,13 +20,13 @@
 /sparring:workflow 给登录接口加 rate limiting
 ```
 
-就这么简单。Claude 写方案和代码，Cursor Agent 自动审查，你只管拍板。
+就这么简单。Claude 写方案和代码，默认由 Cursor Agent 自动审查（也可切到 Codex CLI），你只管拍板。
 
 ## 为什么需要
 
 AI 写代码快，但会犯错——幻觉 API、漏掉边界、引入回归。让人逐一 review 每段 AI 代码？不现实。
 
-**Sparring 引入第二个 AI 做自动审查。** Claude Code 写方案和代码，Cursor Agent 以"假设有 bug，找到它"的心态审查——最多 5 轮，直到双方一致。你只在关键节点介入。
+**Sparring 引入第二个 AI 做自动审查。** Claude Code 写方案和代码，审查者可选 Cursor Agent 或 Codex CLI，以"假设有 bug，找到它"的心态审查——最多 5 轮，直到双方一致。你只在关键节点介入。
 
 效果：**AI 产出更可靠，人工 review 更少，心智负担更低。**
 
@@ -168,7 +168,15 @@ watch -n 300 workflow --project https://github.com/orgs/your-org/projects/3 issu
 
 流程：发现新 Issue → 认领 → 分析复杂度 → 小任务直接 Sparring 单 agent 做 → 大任务启动 ClawTeam 并行。
 
-## 审查者配置
+## 审查后端配置
+
+默认审查后端是 `cursor`。可通过环境变量切换为 `codex`：
+
+```bash
+export WORKFLOW_REVIEW_BACKEND=codex
+```
+
+### Cursor backend
 
 Cursor Agent 的模型和 prompt 在 `agents/cursor.md`，由 `/sparring:setup` 生成。
 
@@ -177,6 +185,30 @@ Cursor Agent 的模型和 prompt 在 `agents/cursor.md`，由 `/sparring:setup` 
 临时切模型：
 ```bash
 export WORKFLOW_AGENT_MODEL=opus-4.6-thinking
+```
+
+### Codex backend
+
+需要本机已安装并登录 Codex CLI（`codex login`）。
+
+可选覆盖模型与推理强度：
+```bash
+export WORKFLOW_CODEX_MODEL=gpt-5.4
+export WORKFLOW_CODEX_EFFORT=high
+export WORKFLOW_CODEX_HOME=/tmp/workflow-codex-home-$USER
+```
+
+## 后台审查作业（可选）
+
+当审查耗时较长时，可将 review 放到后台执行：
+
+```bash
+workflow review-proposal-bg <task-id>
+workflow review-code-bg <task-id>
+
+workflow review-status [job-id|task-id]
+workflow review-result <job-id>
+workflow review-cancel <job-id>
 ```
 
 ## License
