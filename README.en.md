@@ -161,7 +161,7 @@ Three backends, freely combinable as primary + fallback:
 
 | Backend | Account | Notes | Best for |
 |---------|---------|-------|---------|
-| 🤖 `cursor` | Cursor subscription | Default, `gpt-5.3-codex-xhigh` | Daily driver |
+| 🤖 `cursor` | Cursor subscription | Default, `gpt-5.5-extra-high` | Daily driver |
 | 🧪 `codex` | OpenAI subscription | Codex CLI, tunable reasoning | Codex quota to burn |
 | 🌟 `glm` | Zhipu pay-as-you-go | Just needs an API key | Fallback / no subscription |
 

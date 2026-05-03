@@ -101,9 +101,9 @@ Ask the user to choose a model. Present these options:
 ```
 Cursor Agent 模型决定 review 的质量和速度：
 
-1) gpt-5.3-codex-xhigh  — 最高质量，适合重要项目 (推荐)
-2) gpt-5.3-codex-high   — 高质量，速度稍快
-3) gpt-5.3-codex        — 标准质量，最快
+1) gpt-5.5-extra-high  — 最高质量，适合重要项目 (推荐)
+2) gpt-5.5-high   — 高质量，速度稍快
+3) gpt-5.5-medium        — 标准质量，最快
 4) opus-4.6-thinking    — Claude Opus，适合偏好 Anthropic 模型
 5) 自定义               — 手动输入
 

@@ -200,7 +200,7 @@ sparring review-code <task-id>        # auto-calls agent
 
 **Option 2: Call agent directly:**
 ```bash
-response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "你正在 review 一份技术方案。
+response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.5-extra-high "你正在 review 一份技术方案。
 
 任务: <task-name>
 
@@ -217,7 +217,7 @@ response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-
 **Important notes on calling agent:**
 - Always unset `HTTP_PROXY` and `HTTPS_PROXY` to avoid proxy issues
 - Use `--trust` for non-interactive (headless) mode
-- Model and system prompt are configured in `agents/cursor.md` (default: `gpt-5.3-codex-xhigh`)
+- Model and system prompt are configured in `agents/cursor.md` (default: `gpt-5.5-extra-high`)
 - Override model via env var: `export WORKFLOW_AGENT_MODEL=sonnet-4`
 
 ### Issue Sync Protocol
