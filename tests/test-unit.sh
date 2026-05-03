@@ -931,6 +931,155 @@ test_setup_help_quick_path() {
 }
 test_setup_help_quick_path
 
+echo ""
+echo "=== E2E 回归（来自 QA report） ==="
+
+test_sparring_no_args_no_crash() {
+    # Bug P1#1: 无参数时 bash 3.2 + set -u 崩在 set -- "${args[@]}"
+    local output status=0
+    output=$(bash "$WORKFLOW" </dev/null 2>&1) || status=$?
+    # 空 args 时应退化到 help，不能 exit!=0 也不能含 unbound
+    if echo "$output" | grep -q 'unbound variable'; then
+        echo "  ✗ 无参数时仍报 unbound variable"
+        ((FAIL++))
+    else
+        echo "  ✓ 无参数不崩（args[@] 空数组守卫生效）"
+        ((PASS++))
+    fi
+    # 预期 command 默认 fallback 到 help，exit 0
+    assert_eq "无参数 exit=0（走 help 分支）" "0" "$status"
+}
+test_sparring_no_args_no_crash
+
+test_help_no_raw_ansi_literal() {
+    # Bug P1#2: help 用 heredoc 输出时，'\033' 会字面量显示
+    local out_file="$TMP_DIR/help-out.txt"
+    bash "$WORKFLOW" help >"$out_file" 2>&1
+
+    # 字面量 \033（反斜杠+033）应 0 次出现
+    # grep -c 找不到会 exit 1，用 set +e 保护
+    set +e
+    local raw_count
+    raw_count=$(grep -c '\\033' "$out_file")
+    [[ -z "$raw_count" ]] && raw_count=0
+    set -e 2>/dev/null || true
+    assert_eq "help 输出无字面 \\\\033" "0" "$raw_count"
+
+    # 真 ESC 字节（0x1b）应存在
+    if LC_ALL=C grep -q $'\x1b\\[' "$out_file" 2>/dev/null; then
+        echo "  ✓ help 含真 ESC 字节"
+        ((PASS++))
+    else
+        echo "  ✗ help 未含 ESC 字节"
+        ((FAIL++))
+    fi
+}
+test_help_no_raw_ansi_literal
+
+test_invalid_backend_env_rejected_early() {
+    # Bug P2#3: SPARRING_REVIEW_BACKEND=<bogus> 应在 main() 入口就拒绝，exit 1
+    local output status=0
+    output=$(SPARRING_REVIEW_BACKEND=nonexistent bash "$WORKFLOW" config show </dev/null 2>&1) || status=$?
+    assert_eq "非法 SPARRING_REVIEW_BACKEND exit=1" "1" "$status"
+    assert_contains "错误信息含 backend 名字" "nonexistent" "$output"
+    assert_contains "错误信息提示合法值" "cursor" "$output"
+}
+test_invalid_backend_env_rejected_early
+
+test_invalid_fallback_env_rejected_early() {
+    local output status=0
+    output=$(WORKFLOW_REVIEW_BACKEND_FALLBACK=bogus bash "$WORKFLOW" config show </dev/null 2>&1) || status=$?
+    assert_eq "非法 WORKFLOW_REVIEW_BACKEND_FALLBACK exit=1" "1" "$status"
+    assert_contains "错误信息含字段名" "FALLBACK" "$output"
+}
+test_invalid_fallback_env_rejected_early
+
+test_config_path_env_overridable() {
+    # Bug P2#6: CONFIG_DIR_GLOBAL / CONFIG_FILE_GLOBAL 环境变量应能覆盖默认路径
+    local output
+    output=$(CONFIG_FILE_GLOBAL=/tmp/sparring-test-override.json \
+             bash "$WORKFLOW" config path </dev/null 2>&1)
+    assert_contains "CONFIG_FILE_GLOBAL 注入生效" "/tmp/sparring-test-override.json" "$output"
+}
+test_config_path_env_overridable
+
+test_config_init_handles_missing_parent_dir() {
+    # Sparring CONCERN 2: 只注入 CONFIG_FILE_GLOBAL（父目录不存在时）
+    # config init 应能创建父目录，不能因 mkdir 路径不对而失败
+    local deep="$TMP_DIR/deep-nested/parent-dir/config.json"
+    rm -rf "$TMP_DIR/deep-nested"
+    local rc=0
+    CONFIG_FILE_GLOBAL="$deep" \
+    CONFIG_DIR_GLOBAL="$(dirname "$deep")" \
+    bash "$WORKFLOW" config init </dev/null >/dev/null 2>&1 || rc=$?
+    assert_eq "config init 嵌套父目录不存在时 exit=0" "0" "$rc"
+    assert_file_exists "config 文件按 CONFIG_FILE_GLOBAL 写入" "$deep"
+}
+test_config_init_handles_missing_parent_dir
+
+test_config_init_file_only_override() {
+    # 用户只设 CONFIG_FILE_GLOBAL 不设 CONFIG_DIR_GLOBAL 也应能工作
+    local only_file="$TMP_DIR/file-only/my-config.json"
+    rm -rf "$TMP_DIR/file-only"
+    local rc=0
+    CONFIG_FILE_GLOBAL="$only_file" \
+    bash "$WORKFLOW" config init </dev/null >/dev/null 2>&1 || rc=$?
+    assert_eq "config init 仅覆盖 FILE 时 exit=0" "0" "$rc"
+    assert_file_exists "config 文件按 FILE 写入" "$only_file"
+}
+test_config_init_file_only_override
+
+test_config_init_help_supported() {
+    # Bug P2#5: config init --help 应当打印用法，不报"未知选项"
+    local output status=0
+    output=$(bash "$WORKFLOW" config init --help </dev/null 2>&1) || status=$?
+    assert_eq "config init --help exit=0" "0" "$status"
+    assert_contains "config init --help 含用法" "sparring config" "$output"
+    # 不能进入实际 init 流程（不写文件）
+    if echo "$output" | grep -q '未知选项'; then
+        echo "  ✗ config init --help 仍报未知选项"
+        ((FAIL++))
+    else
+        echo "  ✓ config init --help 被正确识别"
+        ((PASS++))
+    fi
+}
+test_config_init_help_supported
+
+test_config_cmd_help_alias() {
+    # 支持 sparring config --help / sparring config -h / sparring config help
+    local o1 o2 o3
+    o1=$(bash "$WORKFLOW" config --help 2>&1)
+    o2=$(bash "$WORKFLOW" config -h 2>&1)
+    o3=$(bash "$WORKFLOW" config help 2>&1)
+    assert_contains "config --help 正常" "子命令" "$o1"
+    assert_contains "config -h 正常" "子命令" "$o2"
+    assert_contains "config help 正常" "子命令" "$o3"
+}
+test_config_cmd_help_alias
+
+test_verify_returns_nonzero_on_failure() {
+    # Bug P2#4: verify 里有失败后端时，最后应 return 1，不是只打印 ✗
+    # 用无效 GLM API key 强制失败，backend=glm
+    local rc=0
+    SPARRING_REVIEW_BACKEND=glm \
+    SPARRING_GLM_API_KEY=definitely-invalid-key \
+    SPARRING_REVIEW_TIMEOUT=5 \
+    bash "$WORKFLOW" verify >/dev/null 2>&1 || rc=$?
+    # 预期非 0（连通性必然失败）
+    if [[ $rc -eq 0 ]]; then
+        echo "  ✗ verify 主 backend 失败时 exit=0（应该 !=0）"
+        ((FAIL++))
+    else
+        echo "  ✓ verify 主 backend 失败时 exit=${rc}（非 0）"
+        ((PASS++))
+    fi
+}
+# 跑这个测试需要真实网络（curl 会尝试）。加条件跳过：没网络或快速 CI 时不跑
+if [[ "${SPARRING_TEST_SKIP_NETWORK:-}" != "1" ]]; then
+    test_verify_returns_nonzero_on_failure
+fi
+
 test_resolve_script_dir_via_symlink() {
     # 软链解析必须指向 repo 根，无论从哪调
     source_workflow_funcs
