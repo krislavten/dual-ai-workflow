@@ -20,13 +20,13 @@
 /sparring:workflow 给登录接口加 rate limiting
 ```
 
-就这么简单。Claude 写方案和代码，默认由 Cursor Agent 自动审查（也可切到 Codex CLI），你只管拍板。
+就这么简单。Claude 写方案和代码，审查者可选 **Cursor Agent / Codex CLI / 智谱 GLM**，你只管拍板。支持[主/备降级](#主--备降级)——主 reviewer 挂了自动切到备用 backend，工作流不阻塞。
 
 ## 为什么需要
 
 AI 写代码快，但会犯错——幻觉 API、漏掉边界、引入回归。让人逐一 review 每段 AI 代码？不现实。
 
-**Sparring 引入第二个 AI 做自动审查。** Claude Code 写方案和代码，审查者可选 Cursor Agent 或 Codex CLI，以"假设有 bug，找到它"的心态审查——最多 5 轮，直到双方一致。你只在关键节点介入。
+**Sparring 引入第二个 AI 做自动审查。** Claude Code 写方案和代码，审查者可选 Cursor Agent / Codex CLI / 智谱 GLM，以"假设有 bug，找到它"的心态审查——最多 5 轮，直到双方一致。你只在关键节点介入。支持配置主+备，主 reviewer 调用失败时自动降级。
 
 效果：**AI 产出更可靠，人工 review 更少，心智负担更低。**
 
@@ -170,32 +170,113 @@ watch -n 300 workflow --project https://github.com/orgs/your-org/projects/3 issu
 
 ## 审查后端配置
 
-默认审查后端是 `cursor`。可通过环境变量切换为 `codex`：
+支持三种 backend，可自由组合主备：
+
+| Backend | 说明 | 特点 |
+|---------|------|------|
+| `cursor` | Cursor Agent（默认） | 本机走 Cursor 账号 |
+| `codex` | Codex CLI | 本机走 OpenAI 账号 |
+| `glm` | 智谱 GLM API | 国产、pay-as-you-go，适合降级备份 |
+
+### 配置方式
+
+从低到高优先级：**内置默认 → 全局 config → 项目 config → 环境变量**。
 
 ```bash
-export WORKFLOW_REVIEW_BACKEND=codex
+# 一键生成全局配置（chmod 600，存 API key）
+workflow config init
+
+# 项目级配置（团队共享 backend 选型，api_key 仍放全局）
+workflow config init project
+
+# 看合并后的生效配置（key 自动掩码）
+workflow config show
+
+# 取单个值
+workflow config get review.backend
+workflow config get glm.api_key   # 输出掩码
 ```
 
-### Cursor backend
+**全局配置** `~/.config/sparring/config.json`（chmod 600，存 api_key，不入库）：
 
-Cursor Agent 的模型和 prompt 在 `agents/cursor.md`，由 `/sparring:setup` 生成。
-
-默认：`gpt-5.3-codex-xhigh`，严格审查 prompt — 不讨好、不客套、假设有 bug 去找它。
-
-临时切模型：
-```bash
-export WORKFLOW_AGENT_MODEL=opus-4.6-thinking
+```json
+{
+  "review": {
+    "backend": "cursor",
+    "fallback": "glm",
+    "timeout": 60,
+    "retries": 1
+  },
+  "glm": {
+    "api_key": "<id.secret>",
+    "model": "glm-5.1"
+  }
+}
 ```
 
-### Codex backend
+**项目配置** `.sparring/config.json`（默认入库，团队共享；`.sparring/.gitignore` 自动屏蔽 secrets）：
 
-需要本机已安装并登录 Codex CLI（`codex login`）。
+```json
+{
+  "review": {
+    "backend": "cursor",
+    "fallback": "glm"
+  }
+}
+```
 
-可选覆盖模型与推理强度：
+### 主 + 备降级
+
+主 backend 调用失败（超时、网络错、CLI 异常等任意非零退出）时，自动切到备 backend。
+
+触发降级时日志会明确提示：
+```
+⚠ 主 backend Cursor Agent 调用失败，降级到 GLM...
+```
+
+**三种典型组合**：
+
+- **A) 纯 GLM** — `review.backend = glm`，国产按量付费
+- **B) Cursor 主 + GLM 备** — 推荐，Cursor 抽风也不阻塞（`review.backend = cursor`, `review.fallback = glm`）
+- **C) Codex 主 + GLM 备** — Codex 额度省着用
+
+### 环境变量（覆盖 config.json 任意字段）
+
+主推 `SPARRING_*` 前缀，历史 `WORKFLOW_*` 仍兼容。命名规则：`SPARRING_<大写_下划线>` 对应 `key.path`。
+
 ```bash
-export WORKFLOW_CODEX_MODEL=gpt-5.4
-export WORKFLOW_CODEX_EFFORT=high
-export WORKFLOW_CODEX_HOME=/tmp/workflow-codex-home-$USER
+# 常用
+export SPARRING_REVIEW_BACKEND=glm       # review.backend
+export SPARRING_REVIEW_FALLBACK=cursor   # review.fallback
+export SPARRING_GLM_API_KEY=<id.secret>  # glm.api_key
+export SPARRING_REVIEW_TIMEOUT=120       # review.timeout
+export SPARRING_REVIEW_RETRIES=2         # review.retries
+
+# 历史变量（仍生效）
+export WORKFLOW_REVIEW_BACKEND=glm
+export WORKFLOW_REVIEW_BACKEND_FALLBACK=cursor
+export WORKFLOW_GLM_API_KEY=<id.secret>
+```
+
+### 各 backend 参数
+
+| key | 默认 | 说明 |
+|---|---|---|
+| `cursor.model` | 读 `agents/cursor.md` | 临时切：`SPARRING_CURSOR_MODEL` |
+| `codex.model` | 读 codex config | 可填 `gpt-5.4` 等 |
+| `codex.effort` | null | `none\|minimal\|low\|medium\|high\|xhigh` |
+| `codex.home` | `/tmp/workflow-codex-home-<user>` | codex 本地状态 |
+| `glm.api_key` | **必填** | 从 <https://open.bigmodel.cn/usercenter/apikeys> 申请 |
+| `glm.model` | `glm-5.1` | 换其他智谱模型 |
+| `glm.thinking` | `disabled` | 开 `enabled` 质量更高但慢 |
+| `glm.max_tokens` | `8192` | 开 thinking 时建议 `65536` |
+| `glm.temperature` | `0.3` | review 场景不需要太高 |
+| `glm.api_base` | 官方 URL | 可换自建网关 |
+
+### 验证
+
+```bash
+workflow verify   # 主/备 backend 连通性 + 模型 + key 掩码
 ```
 
 ## 后台审查作业（可选）
