@@ -7,10 +7,10 @@
 ```bash
 # 1. 初始化工作流（如果还没初始化）
 cd ~/develop/pilot
-workflow init
+sparring init
 
 # 2. 创建任务，指定 Claude 为执行者
-workflow create "refactor-auth-system" claude
+sparring create "refactor-auth-system" claude
 
 # 3. 编辑任务描述
 vim .workflow/plans/20260316-211730-refactor-auth-system/task.md
@@ -20,26 +20,26 @@ vim .workflow/plans/20260316-211730-refactor-auth-system/task.md
 # "请为任务 20260316-211730-refactor-auth-system 编写技术方案，保存到相应目录"
 
 # 5. Cursor Agent review 方案
-workflow review-proposal 20260316-211730-refactor-auth-system
+sparring review-proposal 20260316-211730-refactor-auth-system
 # 在 Cursor 中使用 agent review 方案
 
 # 6. 如果需要修改，Claude 更新方案，然后再次 review
 # 重复直到双方满意
 
 # 7. 批准方案
-workflow approve-proposal 20260316-211730-refactor-auth-system
+sparring approve-proposal 20260316-211730-refactor-auth-system
 
 # 8. Claude Code 实现代码
-workflow implement 20260316-211730-refactor-auth-system
+sparring implement 20260316-211730-refactor-auth-system
 # 在 Claude Code 中根据方案实现
 
 # 9. Cursor Agent review 代码
-workflow review-code 20260316-211730-refactor-auth-system
+sparring review-code 20260316-211730-refactor-auth-system
 
 # 10. 如果需要修改，继续修改和 review
 
 # 11. 最终批准
-workflow approve 20260316-211730-refactor-auth-system
+sparring approve 20260316-211730-refactor-auth-system
 
 # 12. 提交代码
 git add .
@@ -60,31 +60,31 @@ git push
 
 ```bash
 cd ~/develop/rush-app
-workflow init  # 如果需要
+sparring init  # 如果需要
 
 # 创建任务，指定 Cursor 为执行者
-workflow create "fix-login-redirect" cursor
+sparring create "fix-login-redirect" cursor
 
 # 编辑任务描述
 vim .workflow/plans/20260316-213000-fix-login-redirect/task.md
 
 # Cursor Agent 编写方案
-workflow propose 20260316-213000-fix-login-redirect
+sparring propose 20260316-213000-fix-login-redirect
 # 在 Cursor 中使用 agent 编写方案
 
 # Claude Code review
-workflow review-proposal 20260316-213000-fix-login-redirect
+sparring review-proposal 20260316-213000-fix-login-redirect
 # 在 Claude Code 中 review
 
 # 批准并实现
-workflow approve-proposal 20260316-213000-fix-login-redirect
-workflow implement 20260316-213000-fix-login-redirect
+sparring approve-proposal 20260316-213000-fix-login-redirect
+sparring implement 20260316-213000-fix-login-redirect
 
 # Cursor 实现代码，Claude review
-workflow review-code 20260316-213000-fix-login-redirect
+sparring review-code 20260316-213000-fix-login-redirect
 
 # 批准并提交
-workflow approve 20260316-213000-fix-login-redirect
+sparring approve 20260316-213000-fix-login-redirect
 git add .
 git commit -m "fix: correct login redirect behavior"
 git push
@@ -96,7 +96,7 @@ git push
 
 ```bash
 # 创建任务时不指定执行者，让工具交互式询问
-workflow create "add-user-profile-page"
+sparring create "add-user-profile-page"
 
 # 工具会提示选择:
 # 1) claude  - 用于重构、架构设计、原则性讨论
@@ -110,12 +110,12 @@ workflow create "add-user-profile-page"
 
 ### 快速查看所有任务
 ```bash
-workflow list
+sparring list
 ```
 
 ### 查看特定任务详情
 ```bash
-workflow status <task-id>
+sparring status <task-id>
 ```
 
 ### 查看任务目录中的所有文件

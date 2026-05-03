@@ -48,12 +48,12 @@ If Cursor raises CONCERNS, reconsider your conclusion before presenting to the u
 
 #### Step 1: User + Executor Co-design
 
-When the user invokes `/workflow <task-description> [executor]` (default executor: claude):
+When the user invokes `/sparring:workflow <task-description> [executor]` (default executor: claude):
 
 1. **Initialize Task**
    ```bash
-   workflow init  # if not exists
-   workflow create "<task-name>" <executor>
+   sparring init  # if not exists
+   sparring create "<task-name>" <executor>
    ```
 
 2. **Engage User in Discussion**
@@ -69,7 +69,7 @@ When the user invokes `/workflow <task-description> [executor]` (default executo
 
 #### Step 3: Auto-Review Loop (No User)
 
-4. **MUST call reviewer**: `workflow review-proposal <task-id>`
+4. **MUST call reviewer**: `sparring review-proposal <task-id>`
    - Cursor Agent auto-reviews. If CONCERNS, address them and call again.
    - Repeat up to 5 rounds.
 
@@ -83,7 +83,7 @@ When the user invokes `/workflow <task-description> [executor]` (default executo
 #### Step 5: Auto-Implementation (No User)
 
 7. **Implement code** per approved proposal
-8. **MUST call reviewer**: `workflow review-code <task-id>`
+8. **MUST call reviewer**: `sparring review-code <task-id>`
    - Cursor Agent auto-reviews code. If CONCERNS, fix and call again.
    - Repeat up to 5 rounds.
 
@@ -99,10 +99,10 @@ When the user invokes `/workflow <task-description> [executor]` (default executo
 1. **Engage user first** - Ask questions, discuss approaches
 2. **Co-create draft** with user input
 3. **Write formal proposal** to `.workflow/plans/<task-id>/proposal.md`
-4. **MUST call reviewer**: `workflow review-proposal <task-id>`
+4. **MUST call reviewer**: `sparring review-proposal <task-id>`
 5. **Present to user** with summary, wait for approval
 6. **Implement code** after user confirms
-7. **MUST call reviewer**: `workflow review-code <task-id>`
+7. **MUST call reviewer**: `sparring review-code <task-id>`
 8. **Present to user** for final approval
 
 **The reviewer steps (4 and 7) are NOT optional.** Every proposal and implementation MUST go through Cursor Agent review before presenting to the user.
@@ -118,8 +118,8 @@ When the user invokes `/workflow <task-description> [executor]` (default executo
 
 **Option 1: Use the CLI (for formal proposal/code review):**
 ```bash
-workflow review-proposal <task-id>    # auto-calls agent with full context
-workflow review-code <task-id>        # auto-calls agent with diff
+sparring review-proposal <task-id>    # auto-calls agent with full context
+sparring review-code <task-id>        # auto-calls agent with diff
 ```
 
 **Option 2: Call agent directly (for ad-hoc conclusion review):**
@@ -140,7 +140,7 @@ When a task has an associated `issue_number` in `meta.json`, **sync key actions 
 - The `workflow` CLI auto-syncs review results (Cursor Agent reviews)
 - **You (Claude) must manually sync your own actions** using:
   ```bash
-  workflow issue-comment <number> "🧠 **[Claude Code — <Phase>]**
+  sparring issue-comment <number> "🧠 **[Claude Code — <Phase>]**
 
   <your content here>"
   ```

@@ -17,7 +17,7 @@ The result: more reliable AI output, less manual review, lower cognitive load.
 ## Install
 
 ```
-/plugin marketplace add krislavten/dual-ai-workflow
+/plugin marketplace add krislavten/sparring
 /plugin install sparring@sparring
 ```
 
@@ -99,10 +99,10 @@ clawteam team spawn-team my-project -d "Refactor user system" -n leader
 
 # 2. Spawn workers, each with Sparring review
 clawteam spawn tmux claude --team my-project --agent-name auth \
-  --task "Implement auth module. Run workflow review-code my-project when done for Cursor review"
+  --task "Implement auth module. Run sparring review-code my-project when done for Cursor review"
 
 clawteam spawn tmux claude --team my-project --agent-name db \
-  --task "Implement database layer. Run workflow review-code my-project when done for Cursor review"
+  --task "Implement database layer. Run sparring review-code my-project when done for Cursor review"
 
 # 3. Watch all agents work simultaneously
 clawteam board attach my-project
@@ -124,17 +124,17 @@ Precedence (low → high): **built-in defaults → global config → project con
 
 ```bash
 # Generate global config (chmod 600, stores API key)
-workflow config init
+sparring config init
 
 # Generate project config (team-shared backend choice; api_key stays global)
-workflow config init project
+sparring config init project
 
 # View merged effective config (keys masked)
-workflow config show
+sparring config show
 
 # Get a single value
-workflow config get review.backend
-workflow config get glm.api_key   # returns masked
+sparring config get review.backend
+sparring config get glm.api_key   # returns masked
 ```
 
 **Global config** `~/.config/sparring/config.json` (chmod 600, contains api_key, do not commit):
@@ -216,7 +216,7 @@ export WORKFLOW_GLM_API_KEY=<id.secret>
 ### Verify
 
 ```bash
-workflow verify   # connectivity + model + masked key for primary/fallback
+sparring verify   # connectivity + model + masked key for primary/fallback
 ```
 
 ## Background Review Jobs (Optional)
@@ -224,12 +224,12 @@ workflow verify   # connectivity + model + masked key for primary/fallback
 For long-running reviews, run review jobs in the background:
 
 ```bash
-workflow review-proposal-bg <task-id>
-workflow review-code-bg <task-id>
+sparring review-proposal-bg <task-id>
+sparring review-code-bg <task-id>
 
-workflow review-status [job-id|task-id]
-workflow review-result <job-id>
-workflow review-cancel <job-id>
+sparring review-status [job-id|task-id]
+sparring review-result <job-id>
+sparring review-cancel <job-id>
 ```
 
 ## License

@@ -1,9 +1,36 @@
 #!/bin/bash
 
-# Dual AI Workflow - 交互式初始化设置
-# 帮助用户快速配置双 AI 协作环境
+# Sparring — 交互式初始化设置
+# 帮助用户快速配置环境
 
 set -euo pipefail
+
+# --help/-h 快速路径：不进入交互流程
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<'USAGE'
+Sparring setup — 交互式安装
+
+用法: sparring setup
+
+功能:
+  1. 检查 & 安装依赖（jq、gh、cursor agent CLI 等）
+  2. 选择 Cursor Agent 模型
+  3. 生成 agents/cursor.md
+  4. 安装 CLI 软链（sparring + workflow 兼容别名）
+  5. 安装 Claude Code skill
+  6. 运行 sparring verify
+
+必须在交互式终端里跑（stdin 是 TTY）。
+USAGE
+    exit 0
+fi
+
+# 必须是交互式 TTY — 防止 CI/测试/子进程误触发完整 setup 流程
+if [[ ! -t 0 ]]; then
+    echo "错误: setup 必须在交互式终端里运行（stdin 不是 TTY）" >&2
+    echo "提示: 用 sparring setup --help 查看功能说明" >&2
+    exit 2
+fi
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -267,26 +294,29 @@ install_and_configure() {
     print_step 4 5 "安装和生成配置"
 
     # 运行 install.sh 的核心逻辑（不重复执行如果已安装）
-    # 1. workflow 命令
-    if command -v workflow &>/dev/null; then
-        echo -e "  ${GREEN}workflow 命令已在 PATH 中${NC}"
+    # 1. sparring 命令（workflow 为兼容别名）
+    local target_dir=""
+    if [[ -d "$HOME/.local/bin" ]]; then
+        target_dir="$HOME/.local/bin"
+    elif [[ -d "/usr/local/bin" ]]; then
+        target_dir="/usr/local/bin"
+    fi
+
+    if [[ -n "$target_dir" ]]; then
+        local sudo_cmd=""
+        [[ "$target_dir" == /usr/local/bin ]] && sudo_cmd="sudo"
+        $sudo_cmd ln -sf "${PROJECT_DIR}/bin/sparring" "${target_dir}/sparring"
+        $sudo_cmd ln -sf "${PROJECT_DIR}/bin/sparring" "${target_dir}/workflow"
+        echo -e "  ${GREEN}已安装 sparring 到 ${target_dir}/ (workflow 为兼容别名)${NC}"
     else
-        if [[ -d "$HOME/.local/bin" ]]; then
-            ln -sf "${PROJECT_DIR}/bin/workflow" "$HOME/.local/bin/workflow"
-            echo -e "  ${GREEN}已安装 workflow 到 ~/.local/bin/${NC}"
-        elif [[ -d "/usr/local/bin" ]]; then
-            sudo ln -sf "${PROJECT_DIR}/bin/workflow" "/usr/local/bin/workflow"
-            echo -e "  ${GREEN}已安装 workflow 到 /usr/local/bin/${NC}"
-        else
-            echo -e "  ${YELLOW}请手动添加到 PATH: export PATH=\"${PROJECT_DIR}/bin:\$PATH\"${NC}"
-        fi
+        echo -e "  ${YELLOW}请手动添加到 PATH: export PATH=\"${PROJECT_DIR}/bin:\$PATH\"${NC}"
     fi
 
     # 2. Claude Code skill
     local skills_dir="$HOME/.claude/skills"
     mkdir -p "${skills_dir}"
-    ln -sf "${PROJECT_DIR}/.skills/workflow" "${skills_dir}/dual-ai-workflow"
-    echo -e "  ${GREEN}已安装 /workflow skill${NC}"
+    ln -sf "${PROJECT_DIR}/.skills/workflow" "${skills_dir}/sparring"
+    echo -e "  ${GREEN}已安装 sparring skill${NC}"
 
     # 3. 生成 agents/cursor.md
     mkdir -p "${AGENTS_DIR}"
@@ -400,7 +430,7 @@ AGENTEOF
 run_verify() {
     print_step 5 5 "验证安装"
 
-    HTTP_PROXY= HTTPS_PROXY= bash "${PROJECT_DIR}/bin/workflow" verify 2>&1
+    HTTP_PROXY= HTTPS_PROXY= bash "${PROJECT_DIR}/bin/sparring" verify 2>&1
 }
 
 # ─── 主流程 ──────────────────────────────────────────────────
@@ -419,11 +449,11 @@ main() {
     echo -e "${BOLD}${GREEN}═══════════════════════════════════════════${NC}"
     echo ""
     echo -e "  开始使用："
-    echo -e "    ${BOLD}/workflow${NC} <任务描述> <claude|cursor>   — 普通模式"
-    echo -e "    ${BOLD}/workflow-yolo${NC} <任务描述> <executor>   — 全自动模式"
-    echo -e "    ${BOLD}/workflow-issue${NC}                        — Issue 驱动模式"
+    echo -e "    ${BOLD}/sparring:workflow${NC} <任务描述>    — 普通模式"
+    echo -e "    ${BOLD}/sparring:yolo${NC} <任务描述>        — 全自动模式"
+    echo -e "    ${BOLD}/sparring:issue${NC} <看板URL>        — Issue 驱动模式"
     echo ""
-    echo -e "  更多帮助: ${DIM}workflow help${NC}"
+    echo -e "  更多帮助: ${DIM}sparring help${NC}"
     echo ""
 }
 

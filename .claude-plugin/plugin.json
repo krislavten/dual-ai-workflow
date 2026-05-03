@@ -1,10 +1,10 @@
 {
   "name": "sparring",
-  "description": "Dual AI peer review — Claude Code writes, Cursor Agent challenges",
-  "version": "2.0.0",
+  "description": "AI peer review — Claude writes, Cursor/Codex/GLM challenges",
+  "version": "2.1.0",
   "author": {
     "name": "krislavten"
   },
-  "repository": "https://github.com/krislavten/dual-ai-workflow",
+  "repository": "https://github.com/krislavten/sparring",
   "license": "MIT"
 }

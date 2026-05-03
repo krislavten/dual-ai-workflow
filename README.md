@@ -8,7 +8,7 @@
 
 ```bash
 # 1. 安装插件
-/plugin marketplace add krislavten/dual-ai-workflow
+/plugin marketplace add krislavten/sparring
 /plugin install sparring@sparring
 
 # 2. 重启会话（输入 /exit 后重新打开 claude）
@@ -111,10 +111,10 @@ clawteam team spawn-team my-project -d "重构用户系统" -n leader
 
 # 2. Spawn 多个 Claude Code worker，各自独立工作 + Sparring 审查
 clawteam spawn tmux claude --team my-project --agent-name auth \
-  --task "实现 auth 模块。写完后运行 workflow review-code my-project 让 Cursor 审查"
+  --task "实现 auth 模块。写完后运行 sparring review-code my-project 让 Cursor 审查"
 
 clawteam spawn tmux claude --team my-project --agent-name db \
-  --task "实现 database 层。写完后运行 workflow review-code my-project 让 Cursor 审查"
+  --task "实现 database 层。写完后运行 sparring review-code my-project 让 Cursor 审查"
 
 # 3. 看所有 agent 同时工作
 clawteam board attach my-project
@@ -128,7 +128,7 @@ clawteam board attach my-project
 
 ```bash
 # 1. 认领 Issue
-workflow --project https://github.com/orgs/your-org/projects/3 issue-claim 106
+sparring --project https://github.com/orgs/your-org/projects/3 issue-claim 106
 
 # 2. 读 Issue 内容，规划子任务
 gh issue view 106 --json body,title
@@ -137,14 +137,14 @@ gh issue view 106 --json body,title
 clawteam team spawn-team issue-106 -d "Issue #106: 重构用户认证" -n leader
 
 clawteam spawn tmux claude --team issue-106 --agent-name auth \
-  --task "实现 OAuth2 模块。完成后运行 workflow review-code issue-106 让 Cursor 审查"
+  --task "实现 OAuth2 模块。完成后运行 sparring review-code issue-106 让 Cursor 审查"
 
 clawteam spawn tmux claude --team issue-106 --agent-name tests \
-  --task "给认证模块写集成测试。完成后运行 workflow review-code issue-106 让 Cursor 审查"
+  --task "给认证模块写集成测试。完成后运行 sparring review-code issue-106 让 Cursor 审查"
 
 # 4. 等所有 worker 完成后，合并并提 PR
 # leader 合并各 worktree，创建 PR 关联 Issue
-workflow --project https://github.com/orgs/your-org/projects/3 issue-done 106 <pr-url>
+sparring --project https://github.com/orgs/your-org/projects/3 issue-done 106 <pr-url>
 ```
 
 ### 自动接单：Loop 轮询看板
@@ -156,14 +156,14 @@ workflow --project https://github.com/orgs/your-org/projects/3 issue-done 106 <p
 /loop 5m /sparring:issue https://github.com/orgs/your-org/projects/3
 ```
 
-或者用 `workflow` CLI 手动轮询：
+或者用 `sparring` CLI 手动轮询：
 
 ```bash
 # 一次性扫描可认领的 Issue
-workflow --project https://github.com/orgs/your-org/projects/3 issue-poll
+sparring --project https://github.com/orgs/your-org/projects/3 issue-poll
 
 # 持续轮询（用 watch）
-watch -n 300 workflow --project https://github.com/orgs/your-org/projects/3 issue-poll
+watch -n 300 sparring --project https://github.com/orgs/your-org/projects/3 issue-poll
 ```
 
 流程：发现新 Issue → 认领 → 分析复杂度 → 小任务直接 Sparring 单 agent 做 → 大任务启动 ClawTeam 并行。
@@ -184,17 +184,17 @@ watch -n 300 workflow --project https://github.com/orgs/your-org/projects/3 issu
 
 ```bash
 # 一键生成全局配置（chmod 600，存 API key）
-workflow config init
+sparring config init
 
 # 项目级配置（团队共享 backend 选型，api_key 仍放全局）
-workflow config init project
+sparring config init project
 
 # 看合并后的生效配置（key 自动掩码）
-workflow config show
+sparring config show
 
 # 取单个值
-workflow config get review.backend
-workflow config get glm.api_key   # 输出掩码
+sparring config get review.backend
+sparring config get glm.api_key   # 输出掩码
 ```
 
 **全局配置** `~/.config/sparring/config.json`（chmod 600，存 api_key，不入库）：
@@ -276,7 +276,7 @@ export WORKFLOW_GLM_API_KEY=<id.secret>
 ### 验证
 
 ```bash
-workflow verify   # 主/备 backend 连通性 + 模型 + key 掩码
+sparring verify   # 主/备 backend 连通性 + 模型 + key 掩码
 ```
 
 ## 后台审查作业（可选）
@@ -284,12 +284,12 @@ workflow verify   # 主/备 backend 连通性 + 模型 + key 掩码
 当审查耗时较长时，可将 review 放到后台执行：
 
 ```bash
-workflow review-proposal-bg <task-id>
-workflow review-code-bg <task-id>
+sparring review-proposal-bg <task-id>
+sparring review-code-bg <task-id>
 
-workflow review-status [job-id|task-id]
-workflow review-result <job-id>
-workflow review-cancel <job-id>
+sparring review-status [job-id|task-id]
+sparring review-result <job-id>
+sparring review-cancel <job-id>
 ```
 
 ## License

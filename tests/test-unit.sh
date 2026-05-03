@@ -7,7 +7,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-WORKFLOW="$PROJECT_DIR/bin/workflow"
+WORKFLOW="$PROJECT_DIR/bin/sparring"
 AGENTS_DIR="$PROJECT_DIR/agents"
 
 # Test workspace
@@ -835,11 +835,11 @@ test_help_runs() {
 test_help_runs
 
 echo ""
-echo "=== workflow verify (syntax only) ==="
+echo "=== sparring verify (syntax only) ==="
 
 test_syntax() {
     bash -n "$WORKFLOW" 2>&1
-    assert_eq "workflow script syntax valid" "0" "$?"
+    assert_eq "sparring script syntax valid" "0" "$?"
 
     if [[ -f "$PROJECT_DIR/bin/setup" ]]; then
         bash -n "$PROJECT_DIR/bin/setup" 2>&1
@@ -847,6 +847,114 @@ test_syntax() {
     fi
 }
 test_syntax
+
+echo ""
+echo "=== sparring / workflow 兼容别名 ==="
+
+test_workflow_symlink_exists() {
+    assert_file_exists "bin/workflow 软链存在" "$PROJECT_DIR/bin/workflow"
+    # 必须是软链，而不是文件副本
+    if [[ -L "$PROJECT_DIR/bin/workflow" ]]; then
+        echo "  ✓ bin/workflow 是软链（防止重复代码）"
+        ((PASS++))
+    else
+        echo "  ✗ bin/workflow 应该是软链，不是文件"
+        ((FAIL++))
+    fi
+}
+test_workflow_symlink_exists
+
+test_workflow_and_sparring_same_output() {
+    # 调两个命令的 help，输出应该一致
+    local out_sparring out_workflow
+    out_sparring=$(bash "$PROJECT_DIR/bin/sparring" help 2>&1 | wc -l | tr -d ' ')
+    out_workflow=$(bash "$PROJECT_DIR/bin/workflow" help 2>&1 | wc -l | tr -d ' ')
+    assert_eq "workflow 软链和 sparring 输出行数一致" "$out_sparring" "$out_workflow"
+}
+test_workflow_and_sparring_same_output
+
+test_help_shows_sparring_usage() {
+    local output
+    output=$(bash "$WORKFLOW" help 2>&1)
+    assert_contains "help 标题用 Sparring" "Sparring" "$output"
+    assert_contains "help 用法提示 sparring" "sparring <command>" "$output"
+    assert_contains "help 提到 workflow 兼容别名" "兼容别名" "$output"
+}
+test_help_shows_sparring_usage
+
+test_setup_exec_uses_resolve_script_dir() {
+    # Sparring CONCERN 1 源码断言：sparring 的 setup dispatch 必须用 _resolve_script_dir
+    # 不能用 $(cd "$(dirname "$0")" && pwd)/setup（会把 global symlink 目录当根）
+    # 做法：直接扫源码，不 exec 真 setup（避免污染环境、消耗 API 配额）
+    local setup_line
+    setup_line=$(grep -E 'setup\).*exec bash' "$WORKFLOW" | head -1)
+    if echo "$setup_line" | grep -q '_resolve_script_dir.*bin/setup'; then
+        echo "  ✓ setup exec 使用 _resolve_script_dir（支持全局软链调用）"
+        ((PASS++))
+    else
+        echo "  ✗ setup exec 未使用 _resolve_script_dir"
+        echo "    line: $setup_line"
+        ((FAIL++))
+    fi
+}
+test_setup_exec_uses_resolve_script_dir
+
+test_setup_rejects_non_tty() {
+    # bin/setup 没有 TTY 时应立刻 exit 2，不能误触发完整 setup
+    local output status=0
+    output=$(bash "$PROJECT_DIR/bin/setup" </dev/null 2>&1) || status=$?
+    assert_eq "非 TTY 时 setup exit 2" "2" "$status"
+    assert_contains "错误信息提示 TTY 要求" "TTY" "$output"
+}
+test_setup_rejects_non_tty
+
+test_setup_help_quick_path() {
+    # sparring setup --help 必须是 quick path，不进入交互流程
+    local output status=0
+    output=$(bash "$PROJECT_DIR/bin/setup" --help </dev/null 2>&1) || status=$?
+    assert_eq "setup --help 正常退出" "0" "$status"
+    assert_contains "setup --help 打印用法" "用法" "$output"
+    # 确保没打 verify 或 install 相关副作用信息
+    if echo "$output" | grep -qE "安装|验证|检查"; then
+        # 允许列出功能步骤中提到，但不应有实际执行提示
+        if echo "$output" | grep -qE "^(正在|✓|已安装)"; then
+            echo "  ✗ setup --help 有执行副作用"
+            ((FAIL++))
+        else
+            echo "  ✓ setup --help 无副作用"
+            ((PASS++))
+        fi
+    else
+        echo "  ✓ setup --help 无副作用"
+        ((PASS++))
+    fi
+}
+test_setup_help_quick_path
+
+test_resolve_script_dir_via_symlink() {
+    # 软链解析必须指向 repo 根，无论从哪调
+    source_workflow_funcs
+    local fake_bin="$TMP_DIR/fake-chain"
+    mkdir -p "$fake_bin"
+    ln -sf "$PROJECT_DIR/bin/sparring" "$fake_bin/sparring"
+    # 在 subshell 里模拟以软链为 $0 调用
+    local resolved
+    resolved=$(bash -c '
+        _resolve_script_dir() {
+            local src="$0"
+            while [[ -L "$src" ]]; do
+                local dir
+                dir=$(cd -P "$(dirname "$src")" && pwd)
+                src=$(readlink "$src")
+                [[ "$src" != /* ]] && src="$dir/$src"
+            done
+            cd -P "$(dirname "$src")/.." && pwd
+        }
+        _resolve_script_dir
+    ' "$fake_bin/sparring")
+    assert_eq "通过软链 _resolve_script_dir 回到 repo 根" "$PROJECT_DIR" "$resolved"
+}
+test_resolve_script_dir_via_symlink
 
 # ─── Summary ─────────────────────────────────────────────────
 

@@ -15,7 +15,7 @@
 
 ### 👥 普通模式（Normal Mode）
 
-**命令：** `/workflow <任务> <执行者>`
+**命令：** `/sparring:workflow <任务> <执行者>`
 
 **特点：你是主导，AI 是助手**
 
@@ -45,7 +45,7 @@ graph TD
 #### 示例对话
 
 ```
-User: /workflow 重构用户认证系统 claude
+User: /sparring:workflow 重构用户认证系统 claude
 
 Claude: 让我先了解一下需求：
 1. 当前认证系统有什么问题？
@@ -139,7 +139,7 @@ Claude: [创建 commit，包含详细说明]
 
 ### 🚀 YOLO 模式（YOLO Mode）
 
-**命令：** `/workflow-yolo <任务> <执行者>`
+**命令：** `/sparring:yolo <任务> <执行者>`
 
 **特点：AI 完全自主，你只负责批准**
 
@@ -166,7 +166,7 @@ graph TD
 #### 示例对话
 
 ```
-User: /workflow-yolo 修复用户头像上传失败的bug cursor
+User: /sparring:yolo 修复用户头像上传失败的bug cursor
 
 [Cursor Agent 完全自主工作]
 [分析问题]
@@ -293,10 +293,10 @@ Cursor: [提交] 完成！🎉
 
 ```bash
 # 不确定用哪个？默认用普通模式
-/workflow <任务> <执行者>
+/sparring:workflow <任务> <执行者>
 
 # 确定任务简单明确？用 YOLO
-/workflow-yolo <任务> <执行者>
+/sparring:yolo <任务> <执行者>
 
 # 还是不确定？先用普通模式，讨论两句就知道了
 ```
