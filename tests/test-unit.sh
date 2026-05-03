@@ -327,6 +327,209 @@ test_review_backend_invalid() {
 }
 test_review_backend_invalid
 
+test_review_backend_glm() {
+    source_workflow_funcs
+    local backend
+    backend=$(WORKFLOW_REVIEW_BACKEND=glm get_review_backend)
+    assert_eq "glm review backend" "glm" "$backend"
+}
+test_review_backend_glm
+
+test_review_backend_glm_uppercase() {
+    source_workflow_funcs
+    local backend
+    backend=$(WORKFLOW_REVIEW_BACKEND=GLM get_review_backend)
+    assert_eq "glm backend case-insensitive" "glm" "$backend"
+}
+test_review_backend_glm_uppercase
+
+echo ""
+echo "=== fallback backend ==="
+
+test_fallback_unset() {
+    source_workflow_funcs
+    unset WORKFLOW_REVIEW_BACKEND_FALLBACK
+    local fb
+    fb=$(get_review_backend_fallback)
+    assert_eq "no fallback when unset" "" "$fb"
+}
+test_fallback_unset
+
+test_fallback_glm() {
+    source_workflow_funcs
+    local fb
+    fb=$(WORKFLOW_REVIEW_BACKEND_FALLBACK=glm get_review_backend_fallback)
+    assert_eq "fallback glm" "glm" "$fb"
+}
+test_fallback_glm
+
+test_fallback_invalid() {
+    source_workflow_funcs
+    local status=0
+    WORKFLOW_REVIEW_BACKEND_FALLBACK=bogus get_review_backend_fallback 2>/dev/null || status=$?
+    assert_eq "invalid fallback fails" "1" "$status"
+}
+test_fallback_invalid
+
+test_reviewer_label_glm() {
+    source_workflow_funcs
+    local label
+    label=$(reviewer_label_for_backend "glm")
+    assert_eq "glm label" "GLM" "$label"
+}
+test_reviewer_label_glm
+
+echo ""
+echo "=== call_reviewer fallback behavior ==="
+
+test_call_reviewer_fallback_triggers() {
+    source_workflow_funcs
+    # 主 backend 失败 → 备 backend 成功 → 应返回备的结果
+    _call_backend() {
+        local backend="$1"
+        if [[ "$backend" == "cursor" ]]; then
+            echo "cursor failed" >&2
+            return 1
+        fi
+        if [[ "$backend" == "glm" ]]; then
+            echo "APPROVE from glm"
+            return 0
+        fi
+        return 1
+    }
+
+    local result
+    result=$(WORKFLOW_REVIEW_BACKEND=cursor WORKFLOW_REVIEW_BACKEND_FALLBACK=glm \
+        call_reviewer "test prompt" "" 2>/dev/null)
+    assert_eq "fallback to glm on primary failure" "APPROVE from glm" "$result"
+}
+test_call_reviewer_fallback_triggers
+
+test_call_reviewer_no_fallback_fails() {
+    source_workflow_funcs
+    _call_backend() {
+        echo "failed" >&2
+        return 1
+    }
+
+    local status=0
+    WORKFLOW_REVIEW_BACKEND=cursor call_reviewer "p" "" >/dev/null 2>&1 || status=$?
+    assert_eq "no fallback, main fails → return non-zero" "1" "$status"
+}
+test_call_reviewer_no_fallback_fails
+
+test_call_reviewer_primary_success_skips_fallback() {
+    source_workflow_funcs
+    local fallback_called=0
+    _call_backend() {
+        local backend="$1"
+        if [[ "$backend" == "cursor" ]]; then
+            echo "APPROVE from cursor"
+            return 0
+        fi
+        fallback_called=1
+        return 0
+    }
+
+    local result
+    result=$(WORKFLOW_REVIEW_BACKEND=cursor WORKFLOW_REVIEW_BACKEND_FALLBACK=glm \
+        call_reviewer "p" "" 2>/dev/null)
+    assert_eq "primary success returns primary result" "APPROVE from cursor" "$result"
+    assert_eq "fallback not invoked on primary success" "0" "$fallback_called"
+}
+test_call_reviewer_primary_success_skips_fallback
+
+test_call_reviewer_same_primary_fallback() {
+    source_workflow_funcs
+    _call_backend() {
+        return 1
+    }
+
+    local status=0
+    WORKFLOW_REVIEW_BACKEND=glm WORKFLOW_REVIEW_BACKEND_FALLBACK=glm \
+        call_reviewer "p" "" >/dev/null 2>&1 || status=$?
+    assert_eq "same primary/fallback — fails without extra retry" "1" "$status"
+}
+test_call_reviewer_same_primary_fallback
+
+echo ""
+echo "=== check_glm ==="
+
+test_check_glm_no_key() {
+    source_workflow_funcs
+    local status=0
+    ( unset WORKFLOW_GLM_API_KEY; check_glm ) 2>/dev/null || status=$?
+    assert_eq "check_glm fails without API key" "1" "$status"
+}
+test_check_glm_no_key
+
+test_check_glm_with_key() {
+    source_workflow_funcs
+    WORKFLOW_GLM_API_KEY="fake.key" check_glm 2>/dev/null
+    assert_eq "check_glm passes with API key" "0" "$?"
+}
+test_check_glm_with_key
+
+echo ""
+echo "=== glm response parsing (jq expression) ==="
+
+# 防止 Sparring CONCERN 3 回归：content="" 时 jq `//` 不会回退到 reasoning_content
+test_glm_jq_content_present() {
+    local fixture='{"choices":[{"message":{"content":"APPROVE\n理由","reasoning_content":"思考"}}]}'
+    local result
+    result=$(echo "$fixture" | jq -r '.choices[0].message.content // empty')
+    assert_eq "非空 content 正常返回" "APPROVE
+理由" "$result"
+}
+test_glm_jq_content_present
+
+test_glm_jq_empty_content_does_not_fallback_to_reasoning() {
+    # content="" 时，代码不应兜底到 reasoning_content（思考链不是 review 格式）
+    local fixture='{"choices":[{"message":{"content":"","reasoning_content":"1. 思考"}}]}'
+    local result
+    result=$(echo "$fixture" | jq -r '.choices[0].message.content // empty')
+    # 预期空字符串（不是 "1. 思考"）
+    assert_eq "content='' 不兜底到 reasoning_content" "" "$result"
+}
+test_glm_jq_empty_content_does_not_fallback_to_reasoning
+
+test_glm_jq_detect_reasoning_exhausted() {
+    # 当 content 空但 reasoning 非空时，测 has_reasoning 检测
+    local fixture='{"choices":[{"message":{"content":"","reasoning_content":"abc"}}]}'
+    local has_reasoning
+    has_reasoning=$(echo "$fixture" | jq -r '(.choices[0].message.reasoning_content // "") | length > 0')
+    assert_eq "检测到 reasoning 被用尽" "true" "$has_reasoning"
+}
+test_glm_jq_detect_reasoning_exhausted
+
+echo ""
+echo "=== _agent_attempts ==="
+
+test_agent_attempts_default() {
+    source_workflow_funcs
+    unset AGENT_RETRIES
+    local attempts
+    attempts=$(AGENT_RETRIES=1 _agent_attempts)
+    assert_eq "RETRIES=1 → 2 次尝试" "2" "$attempts"
+}
+test_agent_attempts_default
+
+test_agent_attempts_zero_retries() {
+    source_workflow_funcs
+    local attempts
+    attempts=$(AGENT_RETRIES=0 _agent_attempts)
+    assert_eq "RETRIES=0 → 1 次尝试（不重试）" "1" "$attempts"
+}
+test_agent_attempts_zero_retries
+
+test_agent_attempts_multi() {
+    source_workflow_funcs
+    local attempts
+    attempts=$(AGENT_RETRIES=3 _agent_attempts)
+    assert_eq "RETRIES=3 → 4 次尝试" "4" "$attempts"
+}
+test_agent_attempts_multi
+
 echo ""
 echo "=== commands/ frontmatter ==="
 

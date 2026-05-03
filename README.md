@@ -170,10 +170,29 @@ watch -n 300 workflow --project https://github.com/orgs/your-org/projects/3 issu
 
 ## 审查后端配置
 
-默认审查后端是 `cursor`。可通过环境变量切换为 `codex`：
+支持三种 backend，可自由组合主备：
+
+| Backend | 说明 | 特点 |
+|---------|------|------|
+| `cursor` | Cursor Agent（默认） | 本机走 Cursor 账号 |
+| `codex` | Codex CLI | 本机走 OpenAI 账号 |
+| `glm` | 智谱 GLM API | 国产、pay-as-you-go，适合降级备份 |
+
+### 主 + 备降级
+
+主 backend 调用失败（超时 / 网络错）时，自动切到备 backend。默认不配置备，仅在需要时开启：
 
 ```bash
-export WORKFLOW_REVIEW_BACKEND=codex
+export WORKFLOW_REVIEW_BACKEND=cursor          # 主
+export WORKFLOW_REVIEW_BACKEND_FALLBACK=glm    # 备（可选）
+export WORKFLOW_GLM_API_KEY=<id.secret>        # 备用 key
+```
+
+默认超时 60s、失败后重试 1 次（单 backend 最多尝试 2 次）。可调：
+
+```bash
+export WORKFLOW_REVIEW_TIMEOUT=60   # 单次调用超时
+export WORKFLOW_REVIEW_RETRIES=1    # 失败后重试次数
 ```
 
 ### Cursor backend
@@ -197,6 +216,21 @@ export WORKFLOW_CODEX_MODEL=gpt-5.4
 export WORKFLOW_CODEX_EFFORT=high
 export WORKFLOW_CODEX_HOME=/tmp/workflow-codex-home-$USER
 ```
+
+### GLM backend（智谱）
+
+仅需一个 API key（`id.secret` 格式）。去 <https://open.bigmodel.cn/usercenter/apikeys> 申请。
+
+```bash
+export WORKFLOW_GLM_API_KEY=<id.secret>
+# 可选
+export WORKFLOW_GLM_MODEL=glm-5.1                                       # 模型
+export WORKFLOW_GLM_THINKING=disabled                                   # enabled|disabled（默认关，速度优先）
+export WORKFLOW_GLM_MAX_TOKENS=8192                                     # 开 thinking 时建议调到 65536
+export WORKFLOW_GLM_API_BASE=https://open.bigmodel.cn/api/paas/v4       # 可换自建网关
+```
+
+**推荐用法：** 主用 Cursor/Codex，备用 GLM —— 主服务挂了不阻塞工作流。
 
 ## 后台审查作业（可选）
 

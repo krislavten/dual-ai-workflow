@@ -108,10 +108,29 @@ clawteam board attach my-project
 
 ## Reviewer Backend Configuration
 
-Default reviewer backend is `cursor`. You can switch to `codex`:
+Three backends supported, freely combinable as primary + fallback:
+
+| Backend | Description | Notes |
+|---------|-------------|-------|
+| `cursor` | Cursor Agent (default) | Uses local Cursor account |
+| `codex` | Codex CLI | Uses local OpenAI account |
+| `glm` | Zhipu GLM API | Pay-as-you-go, ideal as fallback |
+
+### Primary + Fallback
+
+If the primary backend fails (timeout / network error), the workflow falls back to the secondary. Fallback is opt-in:
 
 ```bash
-export WORKFLOW_REVIEW_BACKEND=codex
+export WORKFLOW_REVIEW_BACKEND=cursor          # primary
+export WORKFLOW_REVIEW_BACKEND_FALLBACK=glm    # fallback (optional)
+export WORKFLOW_GLM_API_KEY=<id.secret>        # key for fallback
+```
+
+Default timeout is 60s with 1 retry on failure (so up to 2 attempts per backend). Tune if needed:
+
+```bash
+export WORKFLOW_REVIEW_TIMEOUT=60   # per-attempt timeout
+export WORKFLOW_REVIEW_RETRIES=1    # retries after initial failure
 ```
 
 ### Cursor backend
@@ -135,6 +154,21 @@ export WORKFLOW_CODEX_MODEL=gpt-5.4
 export WORKFLOW_CODEX_EFFORT=high
 export WORKFLOW_CODEX_HOME=/tmp/workflow-codex-home-$USER
 ```
+
+### GLM backend (Zhipu AI)
+
+Only needs one API key (format: `id.secret`). Get one at <https://open.bigmodel.cn/usercenter/apikeys>.
+
+```bash
+export WORKFLOW_GLM_API_KEY=<id.secret>
+# Optional
+export WORKFLOW_GLM_MODEL=glm-5.1                                       # model
+export WORKFLOW_GLM_THINKING=disabled                                   # enabled|disabled (default: disabled for speed)
+export WORKFLOW_GLM_MAX_TOKENS=8192                                     # bump to 65536 if thinking is enabled
+export WORKFLOW_GLM_API_BASE=https://open.bigmodel.cn/api/paas/v4       # swap for self-hosted gateway
+```
+
+**Recommended setup:** Use Cursor/Codex as primary and GLM as fallback — your workflow stays unblocked even if the primary service goes down.
 
 ## Background Review Jobs (Optional)
 

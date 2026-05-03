@@ -15,7 +15,15 @@ NC='\033[0m'
 
 # 配置
 MAX_REVIEW_ROUNDS=5
-AGENT_TIMEOUT=120
+AGENT_TIMEOUT="${WORKFLOW_REVIEW_TIMEOUT:-60}"
+# RETRIES = 失败后重试次数（默认 1，即最多 2 次尝试：1 次主 + 1 次重试）
+AGENT_RETRIES="${WORKFLOW_REVIEW_RETRIES:-1}"
+# 内部循环总尝试次数 = retries + 1（保底至少 1 次）
+_agent_attempts() {
+    local n=$(( ${AGENT_RETRIES:-1} + 1 ))
+    [[ $n -lt 1 ]] && n=1
+    echo $n
+}
 # Resolve symlink to find real script location
 _resolve_script_dir() {
     local src="$0"
@@ -38,18 +46,37 @@ REVIEW_BACKEND_DEFAULT="cursor"
 
 # ─── Reviewer Backend 配置 ───────────────────────────────────
 
-get_review_backend() {
-    local backend="${WORKFLOW_REVIEW_BACKEND:-$REVIEW_BACKEND_DEFAULT}"
+_normalize_backend() {
+    local backend="$1"
     backend=$(printf '%s' "$backend" | tr '[:upper:]' '[:lower:]')
-
     case "$backend" in
-        cursor|codex) echo "$backend" ;;
-        *)
-            echo -e "${RED}错误: WORKFLOW_REVIEW_BACKEND 仅支持 cursor 或 codex${NC}" >&2
-            echo "  收到: '${backend}'" >&2
-            return 1
-            ;;
+        cursor|codex|glm) echo "$backend"; return 0 ;;
+        *) return 1 ;;
     esac
+}
+
+get_review_backend() {
+    local raw="${WORKFLOW_REVIEW_BACKEND:-$REVIEW_BACKEND_DEFAULT}"
+    local backend
+    if ! backend=$(_normalize_backend "$raw"); then
+        echo -e "${RED}错误: WORKFLOW_REVIEW_BACKEND 仅支持 cursor / codex / glm${NC}" >&2
+        echo "  收到: '${raw}'" >&2
+        return 1
+    fi
+    echo "$backend"
+}
+
+# 降级后端，空值表示未配置
+get_review_backend_fallback() {
+    local raw="${WORKFLOW_REVIEW_BACKEND_FALLBACK:-}"
+    [[ -z "$raw" ]] && return 0
+    local backend
+    if ! backend=$(_normalize_backend "$raw"); then
+        echo -e "${RED}错误: WORKFLOW_REVIEW_BACKEND_FALLBACK 仅支持 cursor / codex / glm${NC}" >&2
+        echo "  收到: '${raw}'" >&2
+        return 1
+    fi
+    echo "$backend"
 }
 
 reviewer_name_for_backend() {
@@ -57,6 +84,7 @@ reviewer_name_for_backend() {
     case "$backend" in
         cursor) echo "cursor" ;;
         codex)  echo "codex" ;;
+        glm)    echo "glm" ;;
         *)      echo "$backend" ;;
     esac
 }
@@ -66,6 +94,7 @@ reviewer_label_for_backend() {
     case "$backend" in
         cursor) echo "Cursor Agent" ;;
         codex)  echo "Codex CLI" ;;
+        glm)    echo "GLM" ;;
         *)      echo "$backend" ;;
     esac
 }
@@ -130,6 +159,19 @@ check_codex() {
     if ! command -v codex &>/dev/null; then
         echo -e "${RED}错误: 未找到 codex 命令${NC}" >&2
         echo "  请安装: npm install -g @openai/codex" >&2
+        return 1
+    fi
+}
+
+check_glm() {
+    if ! command -v curl &>/dev/null; then
+        echo -e "${RED}错误: 未找到 curl 命令${NC}" >&2
+        return 1
+    fi
+    if [[ -z "${WORKFLOW_GLM_API_KEY:-}" ]]; then
+        echo -e "${RED}错误: 未设置 WORKFLOW_GLM_API_KEY${NC}" >&2
+        echo "  export WORKFLOW_GLM_API_KEY=<id.secret>" >&2
+        echo "  获取: https://open.bigmodel.cn/usercenter/apikeys" >&2
         return 1
     fi
 }
@@ -582,6 +624,7 @@ sync_to_issue() {
         *Claude*|*claude*) icon="🧠" ;;
         *Cursor*|*cursor*) icon="🤖" ;;
         *Codex*|*codex*)   icon="🧪" ;;
+        *GLM*|*glm*)       icon="🌟" ;;
         *)                 icon="🔧" ;;
     esac
 
@@ -688,10 +731,9 @@ init_agent_session() {
 call_cursor_agent() {
     local prompt="$1"
     local task_dir="${2:-}"
-    local max_retries=3
     local result=""
 
-    check_agent
+    check_agent || return 1
 
     # 加载 cursor agent 配置
     load_agent_config "cursor"
@@ -722,15 +764,23 @@ ${prompt}"
         echo -e "${DIM}  使用模型: ${model} | 新会话${NC}" >&2
     fi
 
-    for i in $(seq 1 $max_retries); do
-        result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "${AGENT_TIMEOUT}" \
-            agent --print --trust --model "$model" "${resume_args[@]}" "$prompt" 2>&1) && break
+    local max_attempts
+    max_attempts=$(_agent_attempts)
 
-        if [[ $i -lt $max_retries ]]; then
-            echo -e "${DIM}  agent 调用失败，重试 ($i/$max_retries)...${NC}" >&2
+    for i in $(seq 1 $max_attempts); do
+        if [[ ${#resume_args[@]} -gt 0 ]]; then
+            result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "${AGENT_TIMEOUT}" \
+                agent --print --trust --model "$model" "${resume_args[@]}" "$prompt" 2>&1) && break
+        else
+            result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "${AGENT_TIMEOUT}" \
+                agent --print --trust --model "$model" "$prompt" 2>&1) && break
+        fi
+
+        if [[ $i -lt $max_attempts ]]; then
+            echo -e "${DIM}  agent 调用失败，重试 ($i/$max_attempts)...${NC}" >&2
             sleep 2
         else
-            echo -e "${RED}错误: agent 调用失败 ($max_retries 次重试后)${NC}" >&2
+            echo -e "${RED}错误: agent 调用失败 (共 $max_attempts 次尝试)${NC}" >&2
             echo -e "${DIM}  错误信息: $result${NC}" >&2
             echo ""
             return 1
@@ -742,10 +792,11 @@ ${prompt}"
 
 call_codex_agent() {
     local prompt="$1"
-    local max_retries=3
+    local max_attempts
+    max_attempts=$(_agent_attempts)
     local result=""
 
-    check_codex
+    check_codex || return 1
 
     local model="${WORKFLOW_CODEX_MODEL:-}"
     local effort="${WORKFLOW_CODEX_EFFORT:-}"
@@ -793,20 +844,20 @@ EOF
     echo -e "${DIM}  使用 Codex CLI | 模型: ${model_desc} | 推理: ${effort_desc}${NC}" >&2
     echo -e "${DIM}  CODEX_HOME: ${codex_home}${NC}" >&2
 
-    for i in $(seq 1 $max_retries); do
+    for i in $(seq 1 $max_attempts); do
         if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd "${AGENT_TIMEOUT}" \
             "${codex_cmd[@]}" < "$prompt_file" > "$command_output_file" 2>&1; then
             break
         fi
 
-        if [[ $i -lt $max_retries ]]; then
-            echo -e "${DIM}  codex 调用失败，重试 ($i/$max_retries)...${NC}" >&2
+        if [[ $i -lt $max_attempts ]]; then
+            echo -e "${DIM}  codex 调用失败，重试 ($i/$max_attempts)...${NC}" >&2
             sleep 2
         else
             local err_output
             err_output=$(cat "$command_output_file" 2>/dev/null || true)
             rm -f "$output_file" "$prompt_file" "$command_output_file"
-            echo -e "${RED}错误: codex 调用失败 ($max_retries 次重试后)${NC}" >&2
+            echo -e "${RED}错误: codex 调用失败 (共 $max_attempts 次尝试)${NC}" >&2
             echo -e "${DIM}  错误信息: $err_output${NC}" >&2
             echo ""
             return 1
@@ -832,17 +883,157 @@ EOF
     echo "$result"
 }
 
-call_reviewer() {
+call_glm_agent() {
     local prompt="$1"
-    local task_dir="${2:-}"
-    local backend
-    backend=$(get_review_backend) || return 1
+    local max_attempts
+    max_attempts=$(_agent_attempts)
+
+    check_glm || return 1
+
+    local api_base="${WORKFLOW_GLM_API_BASE:-https://open.bigmodel.cn/api/paas/v4}"
+    local model="${WORKFLOW_GLM_MODEL:-glm-5.1}"
+    local thinking="${WORKFLOW_GLM_THINKING:-disabled}"
+    local max_tokens="${WORKFLOW_GLM_MAX_TOKENS:-8192}"
+    local temperature="${WORKFLOW_GLM_TEMPERATURE:-0.3}"
+
+    # 把 reviewer 指令前缀拼到用户 prompt，跟 codex 分支对齐
+    local full_prompt="你在 Dual AI Workflow 中担任严格 reviewer。
+
+响应格式必须严格二选一：
+1) 通过时：
+APPROVE
+
+[1-2 句理由]
+
+2) 有问题时：
+CONCERNS
+
+1. [问题 + 影响 + 修复建议]
+2. ...
+
+始终用中文，且不要输出其他格式。
+
+${prompt}"
+
+    echo -e "${DIM}  使用 GLM | 模型: ${model} | thinking: ${thinking}${NC}" >&2
+
+    local payload
+    payload=$(jq -n \
+        --arg model "$model" \
+        --arg content "$full_prompt" \
+        --arg thinking "$thinking" \
+        --argjson max_tokens "$max_tokens" \
+        --argjson temperature "$temperature" \
+        '{
+            model: $model,
+            messages: [{role: "user", content: $content}],
+            thinking: {type: $thinking},
+            max_tokens: $max_tokens,
+            temperature: $temperature
+        }')
+
+    local response_file
+    response_file=$(mktemp "${TMPDIR:-/tmp}/workflow-glm.XXXXXX")
+    local http_status=""
+    local result=""
+
+    for i in $(seq 1 $max_attempts); do
+        http_status=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "${AGENT_TIMEOUT}" \
+            curl -sS -w '%{http_code}' -o "$response_file" \
+                --connect-timeout 10 \
+                --max-time "${AGENT_TIMEOUT}" \
+                -X POST "${api_base}/chat/completions" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${WORKFLOW_GLM_API_KEY}" \
+                -d "$payload" 2>/dev/null) || http_status="000"
+
+        if [[ "$http_status" == "200" ]]; then
+            break
+        fi
+
+        if [[ $i -lt $max_attempts ]]; then
+            echo -e "${DIM}  glm 调用失败 (HTTP ${http_status})，重试 ($i/$max_attempts)...${NC}" >&2
+            sleep 2
+        else
+            local body
+            body=$(cat "$response_file" 2>/dev/null | head -c 300)
+            rm -f "$response_file"
+            echo -e "${RED}错误: glm 调用失败 (HTTP ${http_status}, 共 ${max_attempts} 次尝试)${NC}" >&2
+            [[ -n "$body" ]] && echo -e "${DIM}  响应: ${body}${NC}" >&2
+            return 1
+        fi
+    done
+
+    # GLM 响应：choices[0].message.content；空字符串时不应兜底到 reasoning_content
+    # （reasoning 不遵守 APPROVE/CONCERNS 格式，会让上层解析失败）
+    result=$(jq -r '.choices[0].message.content // empty' "$response_file" 2>/dev/null)
+    if [[ -z "${result//[[:space:]]/}" ]]; then
+        # content 为空字符串时，jq `//` 不会回退，手动检查 reasoning 提示用户调参
+        local has_reasoning
+        has_reasoning=$(jq -r '(.choices[0].message.reasoning_content // "") | length > 0' "$response_file" 2>/dev/null)
+        rm -f "$response_file"
+        if [[ "$has_reasoning" == "true" ]]; then
+            echo -e "${RED}错误: glm 返回空 content（finish_reason 可能是 length — reasoning 吃完了 max_tokens）${NC}" >&2
+            echo -e "${DIM}  建议: export WORKFLOW_GLM_MAX_TOKENS=65536 或 WORKFLOW_GLM_THINKING=disabled${NC}" >&2
+        else
+            echo -e "${RED}错误: glm 返回空 content${NC}" >&2
+        fi
+        return 1
+    fi
+    rm -f "$response_file"
+
+    echo "$result"
+}
+
+# 底层：调用指定 backend
+_call_backend() {
+    local backend="$1"
+    local prompt="$2"
+    local task_dir="${3:-}"
 
     case "$backend" in
         cursor) call_cursor_agent "$prompt" "$task_dir" ;;
         codex)  call_codex_agent "$prompt" "$task_dir" ;;
+        glm)    call_glm_agent "$prompt" "$task_dir" ;;
         *)      echo -e "${RED}错误: 不支持的 reviewer backend: ${backend}${NC}" >&2; return 1 ;;
     esac
+}
+
+call_reviewer() {
+    local prompt="$1"
+    local task_dir="${2:-}"
+    local primary fallback
+    primary=$(get_review_backend) || return 1
+    fallback=$(get_review_backend_fallback) || return 1
+
+    local result rc=0
+    result=$(_call_backend "$primary" "$prompt" "$task_dir") || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    if [[ -z "$fallback" ]]; then
+        return $rc
+    fi
+
+    if [[ "$fallback" == "$primary" ]]; then
+        echo -e "${DIM}  (fallback 与主 backend 相同: ${primary}，跳过降级)${NC}" >&2
+        return $rc
+    fi
+
+    local primary_label fallback_label
+    primary_label=$(reviewer_label_for_backend "$primary")
+    fallback_label=$(reviewer_label_for_backend "$fallback")
+    echo -e "${YELLOW}⚠ 主 backend ${primary_label} 调用失败，降级到 ${fallback_label}...${NC}" >&2
+
+    if result=$(_call_backend "$fallback" "$prompt" "$task_dir"); then
+        echo "$result"
+        return 0
+    fi
+
+    echo -e "${RED}错误: 主备 backend 均失败 (${primary_label} → ${fallback_label})${NC}" >&2
+    return 1
 }
 
 # backward compatibility: keep old function name
@@ -1797,16 +1988,183 @@ show_status() {
 
 # ─── 验证环境 ────────────────────────────────────────────────
 
+_verify_cursor() {
+    local ok=true
+    echo -n "agent (Cursor CLI): "
+    if command -v agent &>/dev/null; then
+        echo -e "${GREEN}✓ $(agent --version 2>/dev/null || echo 'installed')${NC}"
+    else
+        echo -e "${RED}✗ 未安装${NC}"
+        return 1
+    fi
+
+    load_agent_config "cursor"
+    local verify_model="${WORKFLOW_AGENT_MODEL:-$AGENT_MODEL}"
+    echo -e "  配置文件: ${AGENTS_DIR}/cursor.md"
+    echo -e "  模型: ${verify_model}"
+    if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
+        echo -e "  System prompt: $(echo "$AGENT_SYSTEM_PROMPT" | wc -l | tr -d ' ') 行"
+    else
+        echo -e "  System prompt: (无)"
+    fi
+
+    echo -n "  连通性: "
+    local result
+    if result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd 15 agent --print --trust --model "$verify_model" "Reply with only: OK" 2>&1); then
+        if echo "$result" | grep -qi "OK"; then
+            echo -e "${GREEN}✓ 正常${NC}"
+        else
+            echo -e "${YELLOW}? 有响应但内容异常: ${result:0:50}${NC}"
+        fi
+    else
+        echo -e "${RED}✗ 连接失败${NC}"
+        echo -e "${DIM}  提示: 检查网络和代理配置${NC}"
+        return 1
+    fi
+    $ok
+}
+
+_verify_codex() {
+    echo -n "codex CLI: "
+    if command -v codex &>/dev/null; then
+        echo -e "${GREEN}✓ $(codex --version 2>/dev/null | head -1)${NC}"
+    else
+        echo -e "${RED}✗ 未安装${NC}"
+        return 1
+    fi
+
+    local codex_model="${WORKFLOW_CODEX_MODEL:-}"
+    local codex_effort="${WORKFLOW_CODEX_EFFORT:-}"
+    local codex_home="${WORKFLOW_CODEX_HOME:-${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}}"
+    mkdir -p "$codex_home"
+    echo -e "  模型: ${codex_model:-default(config.toml)}"
+    echo -e "  推理: ${codex_effort:-default(config.toml)}"
+    echo -e "  CODEX_HOME: ${codex_home}"
+
+    echo -n "  连通性: "
+    local output_file command_output_file
+    output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-codex-out.XXXXXX")
+    command_output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-codex-log.XXXXXX")
+
+    local codex_cmd=(codex exec --sandbox read-only --ephemeral --skip-git-repo-check --color never --output-last-message "$output_file")
+    [[ -n "$codex_model" ]] && codex_cmd+=(--model "$codex_model")
+    [[ -n "$codex_effort" ]] && codex_cmd+=(-c "model_reasoning_effort=\"$codex_effort\"")
+    codex_cmd+=("Reply with only: OK")
+
+    local codex_ok=true
+    if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd 20 "${codex_cmd[@]}" < /dev/null > "$command_output_file" 2>&1; then
+        local codex_result
+        if [[ -s "$output_file" ]]; then
+            codex_result=$(cat "$output_file")
+        else
+            codex_result=$(cat "$command_output_file" 2>/dev/null || true)
+        fi
+        codex_result=$(echo "$codex_result" | sed '/^WARNING: proceeding, even though we could not update PATH:/d')
+
+        if echo "$codex_result" | grep -qi "OK"; then
+            echo -e "${GREEN}✓ 正常${NC}"
+        else
+            echo -e "${YELLOW}? 有响应但内容异常: ${codex_result:0:80}${NC}"
+        fi
+    else
+        codex_ok=false
+    fi
+
+    if [[ "$codex_ok" != "true" ]]; then
+        local codex_err
+        codex_err=$(cat "$command_output_file" 2>/dev/null || true)
+        echo -e "${RED}✗ 连接失败${NC}"
+        echo -e "${DIM}  错误: ${codex_err:0:120}${NC}"
+        echo -e "${DIM}  提示: 先执行 codex login${NC}"
+        rm -f "$output_file" "$command_output_file"
+        return 1
+    fi
+
+    rm -f "$output_file" "$command_output_file"
+    return 0
+}
+
+_verify_glm() {
+    echo -n "curl: "
+    if command -v curl &>/dev/null; then
+        echo -e "${GREEN}✓ $(curl --version | head -1 | awk '{print $2}')${NC}"
+    else
+        echo -e "${RED}✗ 未安装${NC}"
+        return 1
+    fi
+
+    echo -n "WORKFLOW_GLM_API_KEY: "
+    if [[ -z "${WORKFLOW_GLM_API_KEY:-}" ]]; then
+        echo -e "${RED}✗ 未设置${NC}"
+        echo -e "${DIM}  export WORKFLOW_GLM_API_KEY=<id.secret>${NC}"
+        return 1
+    fi
+    local key_masked="${WORKFLOW_GLM_API_KEY:0:4}***${WORKFLOW_GLM_API_KEY: -4}"
+    echo -e "${GREEN}✓ ${key_masked}${NC}"
+
+    local api_base="${WORKFLOW_GLM_API_BASE:-https://open.bigmodel.cn/api/paas/v4}"
+    local model="${WORKFLOW_GLM_MODEL:-glm-5.1}"
+    local thinking="${WORKFLOW_GLM_THINKING:-disabled}"
+    echo -e "  API base: ${api_base}"
+    echo -e "  模型: ${model}"
+    echo -e "  thinking: ${thinking}"
+
+    echo -n "  连通性: "
+    local response_file http_status payload
+    response_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-glm.XXXXXX")
+    payload=$(jq -n --arg m "$model" --arg t "$thinking" \
+        '{model:$m,messages:[{role:"user",content:"Reply with only: OK"}],thinking:{type:$t},max_tokens:64,temperature:0.1}')
+
+    http_status=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd 30 \
+        curl -sS -w '%{http_code}' -o "$response_file" \
+            --connect-timeout 10 --max-time 25 \
+            -X POST "${api_base}/chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${WORKFLOW_GLM_API_KEY}" \
+            -d "$payload" 2>/dev/null) || http_status="000"
+
+    if [[ "$http_status" == "200" ]]; then
+        local glm_result
+        glm_result=$(jq -r '.choices[0].message.content // ""' "$response_file" 2>/dev/null)
+        if echo "$glm_result" | grep -qi "OK"; then
+            echo -e "${GREEN}✓ 正常${NC}"
+        else
+            echo -e "${YELLOW}? 有响应但内容异常: ${glm_result:0:80}${NC}"
+        fi
+        rm -f "$response_file"
+        return 0
+    fi
+
+    local body
+    body=$(cat "$response_file" 2>/dev/null | head -c 200)
+    rm -f "$response_file"
+    echo -e "${RED}✗ 连接失败 (HTTP ${http_status})${NC}"
+    [[ -n "$body" ]] && echo -e "${DIM}  响应: ${body}${NC}"
+    return 1
+}
+
+_verify_backend() {
+    local role="$1"
+    local backend="$2"
+    local label
+    label=$(reviewer_label_for_backend "$backend")
+    echo ""
+    echo -e "${BLUE}── ${role}: ${label} (${backend}) ──${NC}"
+    case "$backend" in
+        cursor) _verify_cursor; return $? ;;
+        codex)  _verify_codex; return $? ;;
+        glm)    _verify_glm; return $? ;;
+    esac
+}
+
 verify() {
     echo -e "${BLUE}=== 环境验证 ===${NC}"
     echo ""
 
     local ok=true
-    local backend
-    backend=$(get_review_backend) || return 1
-
-    echo -n "review backend: "
-    echo -e "${GREEN}${backend}${NC}"
+    local primary fallback
+    primary=$(get_review_backend) || return 1
+    fallback=$(get_review_backend_fallback) || return 1
 
     echo -n "jq: "
     if command -v jq &>/dev/null; then
@@ -1816,103 +2174,24 @@ verify() {
         ok=false
     fi
 
-    if [[ "$backend" == "cursor" ]]; then
-        echo -n "agent (Cursor CLI): "
-        if command -v agent &>/dev/null; then
-            echo -e "${GREEN}✓ $(agent --version 2>/dev/null || echo 'installed')${NC}"
-        else
-            echo -e "${RED}✗ 未安装${NC}"
-            ok=false
-        fi
+    echo -n "超时: "
+    echo -e "${GREEN}${AGENT_TIMEOUT}s${NC}  重试次数: ${AGENT_RETRIES} (共 $(_agent_attempts) 次尝试)"
 
-        load_agent_config "cursor"
-        local verify_model="${WORKFLOW_AGENT_MODEL:-$AGENT_MODEL}"
-        echo -e "  配置文件: ${AGENTS_DIR}/cursor.md"
-        echo -e "  模型: ${verify_model}"
-        if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
-            echo -e "  System prompt: $(echo "$AGENT_SYSTEM_PROMPT" | wc -l | tr -d ' ') 行"
-        else
-            echo -e "  System prompt: (无)"
-        fi
-        echo ""
+    _verify_backend "主 backend" "$primary" || ok=false
 
-        echo -n "agent 连通性: "
-        local result
-        if result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd 15 agent --print --trust --model "$verify_model" "Reply with only: OK" 2>&1); then
-            if echo "$result" | grep -qi "OK"; then
-                echo -e "${GREEN}✓ 正常${NC}"
-            else
-                echo -e "${YELLOW}? 有响应但内容异常: ${result:0:50}${NC}"
-            fi
+    if [[ -n "$fallback" ]]; then
+        if [[ "$fallback" == "$primary" ]]; then
+            echo ""
+            echo -e "${YELLOW}⚠ 备 backend 与主相同 (${primary})，跳过${NC}"
         else
-            echo -e "${RED}✗ 连接失败${NC}"
-            echo -e "${DIM}  提示: 检查网络和代理配置，确认 HTTP_PROXY/HTTPS_PROXY 未指向不可用地址${NC}"
-            ok=false
+            _verify_backend "备 backend" "$fallback" || echo -e "${DIM}  (备 backend 失败不阻塞主流程)${NC}"
         fi
     else
-        echo -n "codex CLI: "
-        if command -v codex &>/dev/null; then
-            echo -e "${GREEN}✓ $(codex --version 2>/dev/null | head -1)${NC}"
-        else
-            echo -e "${RED}✗ 未安装${NC}"
-            ok=false
-        fi
-
-        local codex_model="${WORKFLOW_CODEX_MODEL:-}"
-        local codex_effort="${WORKFLOW_CODEX_EFFORT:-}"
-        local codex_home="${WORKFLOW_CODEX_HOME:-${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}}"
-        mkdir -p "$codex_home"
-        echo -e "  模型: ${codex_model:-default(config.toml)}"
-        echo -e "  推理: ${codex_effort:-default(config.toml)}"
-        echo -e "  CODEX_HOME: ${codex_home}"
         echo ""
-
-        echo -n "codex 连通性: "
-        local codex_connect_ok=true
-        local output_file
-        output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-codex-out.XXXXXX")
-        local command_output_file
-        command_output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-codex-log.XXXXXX")
-
-        local codex_cmd=(codex exec --sandbox read-only --ephemeral --skip-git-repo-check --color never --output-last-message "$output_file")
-        if [[ -n "$codex_model" ]]; then
-            codex_cmd+=(--model "$codex_model")
-        fi
-        if [[ -n "$codex_effort" ]]; then
-            codex_cmd+=(-c "model_reasoning_effort=\"$codex_effort\"")
-        fi
-        codex_cmd+=("Reply with only: OK")
-
-        if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd 20 "${codex_cmd[@]}" < /dev/null > "$command_output_file" 2>&1; then
-            local codex_result
-            if [[ -s "$output_file" ]]; then
-                codex_result=$(cat "$output_file")
-            else
-                codex_result=$(cat "$command_output_file" 2>/dev/null || true)
-            fi
-            codex_result=$(echo "$codex_result" | sed '/^WARNING: proceeding, even though we could not update PATH:/d')
-
-            if echo "$codex_result" | grep -qi "OK"; then
-                echo -e "${GREEN}✓ 正常${NC}"
-            else
-                echo -e "${YELLOW}? 有响应但内容异常: ${codex_result:0:80}${NC}"
-            fi
-        else
-            codex_connect_ok=false
-        fi
-
-        if [[ "$codex_connect_ok" != "true" ]]; then
-            local codex_err
-            codex_err=$(cat "$command_output_file" 2>/dev/null || true)
-            echo -e "${RED}✗ 连接失败${NC}"
-            echo -e "${DIM}  错误: ${codex_err:0:120}${NC}"
-            echo -e "${DIM}  提示: 先执行 codex login，或检查 WORKFLOW_CODEX_MODEL / 网络配置${NC}"
-            ok=false
-        fi
-
-        rm -f "$output_file" "$command_output_file"
+        echo -e "${DIM}备 backend: 未配置（设置 WORKFLOW_REVIEW_BACKEND_FALLBACK 启用降级）${NC}"
     fi
 
+    echo ""
     echo -n "项目根目录: "
     echo -e "${GREEN}${PROJECT_ROOT}${NC}"
 
@@ -2029,12 +2308,29 @@ ${YELLOW}全局选项:${NC}
   ${GREEN}--project${NC} <url>               指定 GitHub Project 看板 URL
                                 (例: https://github.com/orgs/xxx/projects/3)
 
-${YELLOW}环境变量:${NC}
-  WORKFLOW_REVIEW_BACKEND 审查后端: cursor|codex (默认: ${REVIEW_BACKEND_DEFAULT})
-  WORKFLOW_AGENT_MODEL    cursor backend 使用的模型 (读取 agents/cursor.md)
-  WORKFLOW_CODEX_MODEL    codex backend 使用的模型 (默认读取 codex config)
-  WORKFLOW_CODEX_EFFORT   codex backend 推理强度 (none|minimal|low|medium|high|xhigh)
-  WORKFLOW_CODEX_HOME     codex backend 的本地状态目录 (默认: /tmp/workflow-codex-home-<user>)
+${YELLOW}环境变量 — Reviewer Backend:${NC}
+  WORKFLOW_REVIEW_BACKEND          主 backend: cursor|codex|glm (默认: ${REVIEW_BACKEND_DEFAULT})
+  WORKFLOW_REVIEW_BACKEND_FALLBACK 备 backend: 主失败时自动降级 (默认: 未配置)
+  WORKFLOW_REVIEW_TIMEOUT          单次调用超时秒数 (默认: 60)
+  WORKFLOW_REVIEW_RETRIES          失败后重试次数 (默认: 1，即最多尝试 2 次)
+
+${YELLOW}环境变量 — Cursor backend:${NC}
+  WORKFLOW_AGENT_MODEL    cursor 使用的模型 (读取 agents/cursor.md)
+
+${YELLOW}环境变量 — Codex backend:${NC}
+  WORKFLOW_CODEX_MODEL    codex 使用的模型 (默认读取 codex config)
+  WORKFLOW_CODEX_EFFORT   codex 推理强度 (none|minimal|low|medium|high|xhigh)
+  WORKFLOW_CODEX_HOME     codex 本地状态目录 (默认: /tmp/workflow-codex-home-<user>)
+
+${YELLOW}环境变量 — GLM backend (智谱):${NC}
+  WORKFLOW_GLM_API_KEY    智谱 API key (id.secret 格式，必填)
+  WORKFLOW_GLM_API_BASE   API base URL (默认: https://open.bigmodel.cn/api/paas/v4)
+  WORKFLOW_GLM_MODEL      模型 (默认: glm-5.1)
+  WORKFLOW_GLM_THINKING   思考链: enabled|disabled (默认: disabled，快)
+  WORKFLOW_GLM_MAX_TOKENS 最大 token (默认: 8192，开 thinking 时需调大)
+  WORKFLOW_GLM_TEMPERATURE 温度 (默认: 0.3)
+
+${YELLOW}环境变量 — 其他:${NC}
   WORKFLOW_POLL_INTERVAL  issue 轮询间隔秒数 (默认: ${ISSUE_POLL_INTERVAL})
   WORKFLOW_ISSUE_LABEL    issue 筛选标签 (默认: ${ISSUE_LABEL})
   WORKFLOW_PROJECT_NUMBER project 编号 (环境变量或 --project)
