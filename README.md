@@ -20,13 +20,13 @@
 /sparring:workflow 给登录接口加 rate limiting
 ```
 
-就这么简单。Claude 写方案和代码，默认由 Cursor Agent 自动审查（也可切到 Codex CLI），你只管拍板。
+就这么简单。Claude 写方案和代码，审查者可选 **Cursor Agent / Codex CLI / 智谱 GLM**，你只管拍板。支持[主/备降级](#主--备降级)——主 reviewer 挂了自动切到备用 backend，工作流不阻塞。
 
 ## 为什么需要
 
 AI 写代码快，但会犯错——幻觉 API、漏掉边界、引入回归。让人逐一 review 每段 AI 代码？不现实。
 
-**Sparring 引入第二个 AI 做自动审查。** Claude Code 写方案和代码，审查者可选 Cursor Agent 或 Codex CLI，以"假设有 bug，找到它"的心态审查——最多 5 轮，直到双方一致。你只在关键节点介入。
+**Sparring 引入第二个 AI 做自动审查。** Claude Code 写方案和代码，审查者可选 Cursor Agent / Codex CLI / 智谱 GLM，以"假设有 bug，找到它"的心态审查——最多 5 轮，直到双方一致。你只在关键节点介入。支持配置主+备，主 reviewer 调用失败时自动降级。
 
 效果：**AI 产出更可靠，人工 review 更少，心智负担更低。**
 
@@ -180,12 +180,29 @@ watch -n 300 workflow --project https://github.com/orgs/your-org/projects/3 issu
 
 ### 主 + 备降级
 
-主 backend 调用失败（超时 / 网络错）时，自动切到备 backend。默认不配置备，仅在需要时开启：
+主 backend 调用失败（超时、网络错、CLI 异常等任意非零退出）时，自动切到备 backend。默认不配置备，仅在需要时开启。
+
+**典型配置组合**（写到 `~/.zshrc` / `~/.bashrc`）：
 
 ```bash
-export WORKFLOW_REVIEW_BACKEND=cursor          # 主
-export WORKFLOW_REVIEW_BACKEND_FALLBACK=glm    # 备（可选）
-export WORKFLOW_GLM_API_KEY=<id.secret>        # 备用 key
+# A) 纯 GLM — 国产首选、按量付费
+export WORKFLOW_REVIEW_BACKEND=glm
+export WORKFLOW_GLM_API_KEY=<id.secret>
+
+# B) Cursor 主 + GLM 备 — 推荐，Cursor 抽风也不阻塞
+export WORKFLOW_REVIEW_BACKEND=cursor
+export WORKFLOW_REVIEW_BACKEND_FALLBACK=glm
+export WORKFLOW_GLM_API_KEY=<id.secret>
+
+# C) Codex 主 + GLM 备 — Codex 额度省着用
+export WORKFLOW_REVIEW_BACKEND=codex
+export WORKFLOW_REVIEW_BACKEND_FALLBACK=glm
+export WORKFLOW_GLM_API_KEY=<id.secret>
+```
+
+触发降级时日志会明确提示：
+```
+⚠ 主 backend Cursor Agent 调用失败，降级到 GLM...
 ```
 
 默认超时 60s、失败后重试 1 次（单 backend 最多尝试 2 次）。可调：
@@ -194,6 +211,14 @@ export WORKFLOW_GLM_API_KEY=<id.secret>        # 备用 key
 export WORKFLOW_REVIEW_TIMEOUT=60   # 单次调用超时
 export WORKFLOW_REVIEW_RETRIES=1    # 失败后重试次数
 ```
+
+用 `workflow verify` 验证主/备 backend 都通：
+
+```bash
+workflow verify
+```
+
+会打印主/备 backend 的连通性、模型、key 掩码。
 
 ### Cursor backend
 

@@ -10,7 +10,7 @@ Like sparring partners in boxing — they push each other to get better, not to 
 
 AI agents write code fast, but mistakes slip through — hallucinated APIs, missed edge cases, subtle regressions. Having a human review every AI-generated change doesn't scale.
 
-**This plugin adds a second AI as an automatic reviewer.** Claude Code writes the proposal and code, and the reviewer can be either Cursor Agent or Codex CLI with a strict, find-the-bug mindset — up to 5 rounds until both agree. You only step in for key decisions.
+**This plugin adds a second AI as an automatic reviewer.** Claude Code writes the proposal and code, and the reviewer can be Cursor Agent, Codex CLI, or Zhipu GLM with a strict, find-the-bug mindset — up to 5 rounds until both agree. You only step in for key decisions. Supports primary + fallback — the workflow auto-degrades to the fallback backend when the primary fails.
 
 The result: more reliable AI output, less manual review, lower cognitive load.
 
@@ -22,6 +22,8 @@ The result: more reliable AI output, less manual review, lower cognitive load.
 ```
 
 Restart your session (`/exit`, then reopen `claude`), then run `/sparring:setup` to install dependencies and configure the reviewer model.
+
+Pick your reviewer — **Cursor Agent / Codex CLI / Zhipu GLM**. Supports [primary + fallback](#primary--fallback) so a flaky primary doesn't block the workflow.
 
 ## Commands
 
@@ -118,12 +120,29 @@ Three backends supported, freely combinable as primary + fallback:
 
 ### Primary + Fallback
 
-If the primary backend fails (timeout / network error), the workflow falls back to the secondary. Fallback is opt-in:
+If the primary backend fails (timeout, network error, or any reviewer failure), the workflow falls back to the secondary. Fallback is opt-in.
+
+**Common setups** (add to `~/.zshrc` / `~/.bashrc`):
 
 ```bash
-export WORKFLOW_REVIEW_BACKEND=cursor          # primary
-export WORKFLOW_REVIEW_BACKEND_FALLBACK=glm    # fallback (optional)
-export WORKFLOW_GLM_API_KEY=<id.secret>        # key for fallback
+# A) GLM only — pay-as-you-go, no subscription needed
+export WORKFLOW_REVIEW_BACKEND=glm
+export WORKFLOW_GLM_API_KEY=<id.secret>
+
+# B) Cursor primary + GLM fallback — recommended, survives Cursor outages
+export WORKFLOW_REVIEW_BACKEND=cursor
+export WORKFLOW_REVIEW_BACKEND_FALLBACK=glm
+export WORKFLOW_GLM_API_KEY=<id.secret>
+
+# C) Codex primary + GLM fallback — save your Codex quota
+export WORKFLOW_REVIEW_BACKEND=codex
+export WORKFLOW_REVIEW_BACKEND_FALLBACK=glm
+export WORKFLOW_GLM_API_KEY=<id.secret>
+```
+
+When fallback triggers, the log makes it explicit:
+```
+⚠ Primary backend Cursor Agent failed, falling back to GLM...
 ```
 
 Default timeout is 60s with 1 retry on failure (so up to 2 attempts per backend). Tune if needed:
@@ -132,6 +151,8 @@ Default timeout is 60s with 1 retry on failure (so up to 2 attempts per backend)
 export WORKFLOW_REVIEW_TIMEOUT=60   # per-attempt timeout
 export WORKFLOW_REVIEW_RETRIES=1    # retries after initial failure
 ```
+
+Run `workflow verify` to check both backends are reachable — it prints connectivity, model, and a masked key.
 
 ### Cursor backend
 
