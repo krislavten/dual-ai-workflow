@@ -1,0 +1,2688 @@
+#!/bin/bash
+
+# Sparring — AI 左右脑互搏 (原 Dual AI Workflow)
+# 支持动态角色分配：执行者(Executor) 和 观察者(Reviewer)
+
+set -euo pipefail
+
+# 颜色输出
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# 配置
+MAX_REVIEW_ROUNDS=5
+# AGENT_TIMEOUT / AGENT_RETRIES 由 _config_get 惰性求值，见下方 Config 段
+# 内部循环总尝试次数 = retries + 1（保底至少 1 次）
+_agent_attempts() {
+    local retries
+    retries=$(_config_get review.retries)
+    local n=$(( retries + 1 ))
+    [[ $n -lt 1 ]] && n=1
+    echo $n
+}
+# 兼容访问器（延迟求值，读当前 config）
+_agent_timeout() { _config_get review.timeout; }
+# Resolve symlink to find real script location
+_resolve_script_dir() {
+    local src="$0"
+    while [[ -L "$src" ]]; do
+        local dir
+        dir=$(cd -P "$(dirname "$src")" && pwd)
+        src=$(readlink "$src")
+        [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    cd -P "$(dirname "$src")/.." && pwd
+}
+AGENTS_DIR="${AGENTS_DIR:-$(_resolve_script_dir)/agents}"
+
+# GitHub Issue 配置
+ISSUE_POLL_INTERVAL="${WORKFLOW_POLL_INTERVAL:-30}"
+ISSUE_LABEL="${WORKFLOW_ISSUE_LABEL:-claude-ok}"
+ISSUE_PROJECT_NUMBER="${WORKFLOW_PROJECT_NUMBER:-}"
+ISSUE_PROJECT_OWNER="${WORKFLOW_PROJECT_OWNER:-}"
+REVIEW_BACKEND_DEFAULT="cursor"
+
+# ─── Reviewer Backend 配置 ───────────────────────────────────
+
+_normalize_backend() {
+    local backend="$1"
+    backend=$(printf '%s' "$backend" | tr '[:upper:]' '[:lower:]')
+    case "$backend" in
+        cursor|codex|glm) echo "$backend"; return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+get_review_backend() {
+    local raw
+    raw=$(_config_get review.backend)
+    [[ -z "$raw" ]] && raw="$REVIEW_BACKEND_DEFAULT"
+    local backend
+    if ! backend=$(_normalize_backend "$raw"); then
+        echo -e "${RED}错误: review.backend 仅支持 cursor / codex / glm${NC}" >&2
+        echo "  收到: '${raw}'" >&2
+        return 1
+    fi
+    echo "$backend"
+}
+
+# 降级后端，空值表示未配置
+get_review_backend_fallback() {
+    local raw
+    raw=$(_config_get review.fallback)
+    [[ -z "$raw" ]] && return 0
+    local backend
+    if ! backend=$(_normalize_backend "$raw"); then
+        echo -e "${RED}错误: review.fallback 仅支持 cursor / codex / glm${NC}" >&2
+        echo "  收到: '${raw}'" >&2
+        return 1
+    fi
+    echo "$backend"
+}
+
+reviewer_name_for_backend() {
+    local backend="$1"
+    case "$backend" in
+        cursor) echo "cursor" ;;
+        codex)  echo "codex" ;;
+        glm)    echo "glm" ;;
+        *)      echo "$backend" ;;
+    esac
+}
+
+reviewer_label_for_backend() {
+    local backend="$1"
+    case "$backend" in
+        cursor) echo "Cursor Agent" ;;
+        codex)  echo "Codex CLI" ;;
+        glm)    echo "GLM" ;;
+        *)      echo "$backend" ;;
+    esac
+}
+
+# ─── Project 链接解析 ────────────────────────────────────────
+
+# 从 GitHub Project URL 解析 owner 和 number
+# 支持格式: https://github.com/orgs/<owner>/projects/<number>
+#           https://github.com/users/<owner>/projects/<number>
+parse_project_url() {
+    local url="$1"
+    if [[ "$url" =~ github\.com/(orgs|users)/([^/]+)/projects/([0-9]+) ]]; then
+        ISSUE_PROJECT_OWNER="${BASH_REMATCH[2]}"
+        ISSUE_PROJECT_NUMBER="${BASH_REMATCH[3]}"
+        return 0
+    fi
+    return 1
+}
+
+# 设置 project 上下文（从 URL 或环境变量）
+# Usage: set_project "https://github.com/orgs/xxx/projects/3"
+#   or:  set_project  (使用环境变量)
+set_project() {
+    local url="${1:-}"
+    if [[ -n "$url" ]]; then
+        if parse_project_url "$url"; then
+            echo -e "${DIM}  Project: ${ISSUE_PROJECT_OWNER} #${ISSUE_PROJECT_NUMBER}${NC}" >&2
+        else
+            echo -e "${RED}错误: 无法解析 project URL: ${url}${NC}" >&2
+            echo "  支持格式: https://github.com/orgs/<owner>/projects/<number>" >&2
+            return 1
+        fi
+    fi
+
+    if [[ -z "$ISSUE_PROJECT_OWNER" || -z "$ISSUE_PROJECT_NUMBER" ]]; then
+        echo -e "${YELLOW}⚠ 未指定 project，看板状态不会更新${NC}" >&2
+        echo "  传入 project URL 或设置 WORKFLOW_PROJECT_OWNER + WORKFLOW_PROJECT_NUMBER" >&2
+    fi
+}
+
+# ─── 依赖检查 ───────────────────────────────────────────────
+
+check_deps() {
+    local missing=()
+    command -v jq &>/dev/null || missing+=("jq")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo -e "${RED}错误: 缺少依赖: ${missing[*]}${NC}"
+        echo "  brew install ${missing[*]}"
+        exit 1
+    fi
+}
+
+check_agent() {
+    if ! command -v agent &>/dev/null; then
+        echo -e "${RED}错误: 未找到 agent 命令 (Cursor CLI)${NC}" >&2
+        echo "  请安装: https://docs.cursor.com/cli" >&2
+        return 1
+    fi
+}
+
+check_codex() {
+    if ! command -v codex &>/dev/null; then
+        echo -e "${RED}错误: 未找到 codex 命令${NC}" >&2
+        echo "  请安装: npm install -g @openai/codex" >&2
+        return 1
+    fi
+}
+
+check_glm() {
+    if ! command -v curl &>/dev/null; then
+        echo -e "${RED}错误: 未找到 curl 命令${NC}" >&2
+        return 1
+    fi
+    local key
+    key=$(_config_get glm.api_key)
+    if [[ -z "$key" ]]; then
+        echo -e "${RED}错误: 未配置 glm.api_key${NC}" >&2
+        echo "  方式1: sparring config init 写入 ~/.config/sparring/config.json" >&2
+        echo "  方式2: export SPARRING_GLM_API_KEY=<id.secret>" >&2
+        echo "  获取: https://open.bigmodel.cn/usercenter/apikeys" >&2
+        return 1
+    fi
+}
+
+# ─── 项目根目录查找（向上查找 .workflow 或 .git） ──────────
+
+find_project_root() {
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -d "$dir/.workflow" ]]; then
+            echo "$dir"
+            return 0
+        fi
+        if [[ -d "$dir/.git" ]]; then
+            echo "$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    echo "$PWD"
+}
+
+PROJECT_ROOT="$(find_project_root)"
+WORKFLOW_DIR="${PROJECT_ROOT}/.workflow"
+
+# ─── 配置层（default < global < project < env） ──────────
+# global: ~/.config/sparring/config.json
+# project: <PROJECT_ROOT>/.sparring/config.json
+# env: SPARRING_* 或 WORKFLOW_*（兼容别名）
+
+CONFIG_DIR_GLOBAL="${XDG_CONFIG_HOME:-$HOME/.config}/sparring"
+CONFIG_FILE_GLOBAL="${CONFIG_DIR_GLOBAL}/config.json"
+CONFIG_DIR_PROJECT="${PROJECT_ROOT}/.sparring"
+CONFIG_FILE_PROJECT="${CONFIG_DIR_PROJECT}/config.json"
+
+# 内置默认 — 所有可配置字段都要在这里给出非 null 默认或显式 null
+_config_defaults() {
+    cat <<'EOF'
+{
+  "review": {
+    "backend": "cursor",
+    "fallback": null,
+    "timeout": 60,
+    "retries": 1
+  },
+  "cursor": {
+    "model": null
+  },
+  "codex": {
+    "model": null,
+    "effort": null,
+    "home": null
+  },
+  "glm": {
+    "api_key": null,
+    "model": "glm-5.1",
+    "thinking": "disabled",
+    "max_tokens": 8192,
+    "temperature": 0.3,
+    "api_base": "https://open.bigmodel.cn/api/paas/v4"
+  }
+}
+EOF
+}
+
+# 读 JSON 文件，不存在或格式错返回 {}
+# 格式错每文件只告警一次（哨兵文件写到 /tmp，避免 $(...) subshell 里 export 丢失）
+# 哨兵文件以 PID + 文件路径的 hash 命名，脚本退出时由 trap 清理
+_config_warn_sentinel() {
+    local file="$1"
+    local safe
+    safe=$(printf '%s' "$file" | tr -c 'A-Za-z0-9' '_')
+    echo "${TMPDIR:-/tmp}/workflow-cfg-warn-$$-${safe}"
+}
+
+_config_read_file() {
+    local file="$1"
+    [[ ! -f "$file" ]] && { echo '{}'; return 0; }
+    if ! jq -e '.' "$file" >/dev/null 2>&1; then
+        local sentinel
+        sentinel=$(_config_warn_sentinel "$file")
+        if [[ ! -f "$sentinel" ]]; then
+            echo -e "${YELLOW}⚠ 配置文件格式错误，忽略: ${file}${NC}" >&2
+            echo -e "${DIM}  (本次运行仅提示一次；用 jq . 该文件自查)${NC}" >&2
+            touch "$sentinel" 2>/dev/null || true
+        fi
+        echo '{}'
+        return 0
+    fi
+    cat "$file"
+}
+
+# 哨兵文件留在 /tmp 里，PID 防冲突；进程结束后文件无人用。
+# 不 trap EXIT 清理，避免在 $(...) 子 shell 退出时误删正在用的哨兵。
+
+# 合并 default + global + project，后者覆盖前者（递归合并）
+_config_merged() {
+    local defaults global project
+    defaults=$(_config_defaults)
+    global=$(_config_read_file "$CONFIG_FILE_GLOBAL")
+    project=$(_config_read_file "$CONFIG_FILE_PROJECT")
+    # jq 的 * 是递归合并
+    jq -n --argjson a "$defaults" --argjson b "$global" --argjson c "$project" '$a * $b * $c'
+}
+
+# key.path 转环境变量名（点号转下划线、全大写）
+_env_name_for_path() {
+    printf '%s' "$1" | tr '[:lower:].' '[:upper:]_'
+}
+
+# 读单个配置值
+# _config_get <key.path>
+# 优先级：SPARRING_<KEY> > WORKFLOW_<KEY>（兼容） > project > global > default
+# Usage: _config_get review.backend
+#        _config_get glm.api_key
+_config_get() {
+    local path="$1"
+    [[ -z "$path" ]] && { echo ""; return 0; }
+
+    local env_suffix
+    env_suffix=$(_env_name_for_path "$path")
+    local sparring_var="SPARRING_${env_suffix}"
+    local workflow_var="WORKFLOW_${env_suffix}"
+
+    # SPARRING_* 最高优先级
+    if [[ -n "${!sparring_var:-}" ]]; then
+        printf '%s' "${!sparring_var}"
+        return 0
+    fi
+    # WORKFLOW_* 兼容别名（schema 对齐的名字）
+    if [[ -n "${!workflow_var:-}" ]]; then
+        printf '%s' "${!workflow_var}"
+        return 0
+    fi
+    # WORKFLOW_* 历史命名的兼容别名（e.g. WORKFLOW_REVIEW_BACKEND_FALLBACK → review.fallback）
+    local legacy
+    if legacy=$(_workflow_legacy_alias "$path"); then
+        printf '%s' "$legacy"
+        return 0
+    fi
+
+    # 从合并后的 JSON 取值
+    local jq_filter=".${path}"
+    local val
+    val=$(_config_merged | jq -r "${jq_filter} // \"\"" 2>/dev/null)
+    # jq 把 null 渲染成 "null" 字符串时（用 // 后不会，但兜底），统一视为空
+    [[ "$val" == "null" ]] && val=""
+    printf '%s' "$val"
+}
+
+# WORKFLOW_* 历史变量到新字段的别名映射（只处理两个不符合 naming convention 的）
+# SPARRING_* 前缀是新引入的，直接跟 schema 对齐（如 SPARRING_REVIEW_FALLBACK），不需要 legacy map
+_workflow_legacy_alias() {
+    local path="$1"
+    case "$path" in
+        review.fallback)
+            [[ -n "${WORKFLOW_REVIEW_BACKEND_FALLBACK:-}" ]] && { printf '%s' "$WORKFLOW_REVIEW_BACKEND_FALLBACK"; return 0; }
+            ;;
+        cursor.model)
+            [[ -n "${WORKFLOW_AGENT_MODEL:-}" ]] && { printf '%s' "$WORKFLOW_AGENT_MODEL"; return 0; }
+            ;;
+    esac
+    return 1
+}
+PLANS_DIR="${WORKFLOW_DIR}/plans"
+REVIEW_JOBS_DIR="${WORKFLOW_DIR}/review-jobs"
+
+# ─── 输入验证 ───────────────────────────────────────────────
+
+validate_task_name() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo -e "${RED}错误: 任务名只能包含字母、数字、下划线、横杠${NC}"
+        echo "  收到: '$name'"
+        exit 1
+    fi
+}
+
+validate_executor() {
+    local executor="$1"
+    if [[ "$executor" != "claude" && "$executor" != "cursor" ]]; then
+        echo -e "${RED}错误: executor 必须是 claude 或 cursor${NC}"
+        echo "  收到: '$executor'"
+        exit 1
+    fi
+}
+
+validate_task_id() {
+    local task_id="$1"
+    if [[ ! "$task_id" =~ ^[0-9]{8}-[0-9]{6}-[a-zA-Z0-9_-]+$ ]]; then
+        echo -e "${RED}错误: task-id 格式非法${NC}"
+        echo "  期望格式: YYYYMMDD-HHMMSS-task-name"
+        echo "  收到: '$task_id'"
+        exit 1
+    fi
+}
+
+validate_task_exists() {
+    local task_id="$1"
+    if [[ -z "$task_id" ]]; then
+        echo -e "${RED}错误: 请提供 task-id${NC}"
+        exit 1
+    fi
+    validate_task_id "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+    if [[ ! -d "$task_dir" || ! -f "$task_dir/meta.json" ]]; then
+        echo -e "${RED}错误: 任务不存在: ${task_id}${NC}"
+        exit 1
+    fi
+}
+
+# ─── 安全的 JSON 更新 ───────────────────────────────────────
+
+update_meta() {
+    local task_dir="$1"
+    shift
+    # 最后一个参数是 jq 表达式，前面的都是 jq 选项（如 --arg）
+    local args=("$@")
+    local last_idx=$(( ${#args[@]} - 1 ))
+    local jq_expr="${args[$last_idx]}"
+    local -a jq_opts=()
+    if [[ $last_idx -gt 0 ]]; then
+        jq_opts=("${args[@]:0:$last_idx}")
+    fi
+    local tmp="${task_dir}/meta.json.tmp"
+
+    local jq_status=0
+    if [[ ${#jq_opts[@]} -gt 0 ]]; then
+        jq "${jq_opts[@]}" "$jq_expr" "${task_dir}/meta.json" > "$tmp" || jq_status=$?
+    else
+        jq "$jq_expr" "${task_dir}/meta.json" > "$tmp" || jq_status=$?
+    fi
+
+    if [[ $jq_status -ne 0 ]]; then
+        rm -f "$tmp"
+        echo -e "${RED}错误: JSON 更新失败${NC}"
+        return 1
+    fi
+    mv -f "$tmp" "${task_dir}/meta.json"
+}
+
+# ─── 后台 Review 作业管理 ─────────────────────────────────────
+
+ensure_review_jobs_dir() {
+    mkdir -p "${REVIEW_JOBS_DIR}"
+}
+
+generate_review_job_id() {
+    printf 'rj-%s-%04x' "$(date +%Y%m%d%H%M%S)" "$((RANDOM % 65536))"
+}
+
+review_job_file_path() {
+    local job_id="$1"
+    echo "${REVIEW_JOBS_DIR}/${job_id}.json"
+}
+
+review_job_log_path() {
+    local job_id="$1"
+    echo "${REVIEW_JOBS_DIR}/${job_id}.log"
+}
+
+review_job_result_path() {
+    local job_id="$1"
+    echo "${REVIEW_JOBS_DIR}/${job_id}.result.md"
+}
+
+review_job_update() {
+    local job_file="$1"
+    shift
+
+    if [[ ! -f "$job_file" ]]; then
+        echo -e "${RED}错误: review job 不存在: ${job_file}${NC}" >&2
+        return 1
+    fi
+
+    local args=("$@")
+    local last_idx=$(( ${#args[@]} - 1 ))
+    local jq_expr="${args[$last_idx]}"
+    local -a jq_opts=()
+    if [[ $last_idx -gt 0 ]]; then
+        jq_opts=("${args[@]:0:$last_idx}")
+    fi
+
+    local tmp="${job_file}.tmp"
+    local jq_status=0
+    if [[ ${#jq_opts[@]} -gt 0 ]]; then
+        jq "${jq_opts[@]}" "$jq_expr" "$job_file" > "$tmp" || jq_status=$?
+    else
+        jq "$jq_expr" "$job_file" > "$tmp" || jq_status=$?
+    fi
+
+    if [[ $jq_status -ne 0 ]]; then
+        rm -f "$tmp"
+        echo -e "${RED}错误: review job JSON 更新失败${NC}" >&2
+        return 1
+    fi
+    mv -f "$tmp" "$job_file"
+}
+
+start_background_review() {
+    local review_type="$1"
+    local task_id="$2"
+
+    validate_task_exists "$task_id"
+    [[ "$review_type" != "proposal" && "$review_type" != "code" ]] && {
+        echo -e "${RED}错误: review_type 必须是 proposal 或 code${NC}"
+        return 1
+    }
+
+    ensure_review_jobs_dir
+    local backend
+    backend=$(get_review_backend) || return 1
+
+    local job_id
+    job_id=$(generate_review_job_id)
+    local job_file
+    job_file=$(review_job_file_path "$job_id")
+    local log_file
+    log_file=$(review_job_log_path "$job_id")
+    local result_file
+    result_file=$(review_job_result_path "$job_id")
+
+    jq -n \
+        --arg job_id "$job_id" \
+        --arg task_id "$task_id" \
+        --arg review_type "$review_type" \
+        --arg backend "$backend" \
+        --arg ts "$(date -Iseconds)" \
+        --arg log_file "$log_file" \
+        --arg result_file "$result_file" \
+        '{
+            job_id: $job_id,
+            task_id: $task_id,
+            review_type: $review_type,
+            backend: $backend,
+            status: "queued",
+            created_at: $ts,
+            started_at: null,
+            completed_at: null,
+            pid: null,
+            exit_code: null,
+            review_state: null,
+            review_file: null,
+            result_file: $result_file,
+            log_file: $log_file
+        }' > "$job_file"
+
+    : > "$log_file"
+
+    local script_path
+    script_path="$(_resolve_script_dir)/bin/sparring"
+    nohup bash "$script_path" __review-worker "$review_type" "$task_id" "$job_id" >> "$log_file" 2>&1 &
+    local pid=$!
+
+    review_job_update "$job_file" \
+        --argjson pid "$pid" \
+        '.pid = $pid'
+
+    echo -e "${GREEN}✓ 后台 review 已启动: ${job_id}${NC}"
+    echo -e "${BLUE}  类型: ${review_type}  任务: ${task_id}  backend: ${backend}${NC}"
+    echo "  状态查看: sparring review-status ${job_id}"
+    echo "  查看结果: sparring review-result ${job_id}"
+    echo "  取消任务: sparring review-cancel ${job_id}"
+}
+
+run_review_worker() {
+    local review_type="$1"
+    local task_id="$2"
+    local job_id="$3"
+
+    validate_task_exists "$task_id"
+
+    local job_file
+    job_file=$(review_job_file_path "$job_id")
+    local log_file
+    log_file=$(review_job_log_path "$job_id")
+    local result_file
+    result_file=$(review_job_result_path "$job_id")
+
+    local ts
+    ts="$(date -Iseconds)"
+    review_job_update "$job_file" \
+        --arg ts "$ts" \
+        --argjson pid "$$" \
+        '.status = "running" | .started_at = $ts | .pid = $pid'
+
+    local task_dir="${PLANS_DIR}/${task_id}"
+    local review_pattern review_step
+    if [[ "$review_type" == "proposal" ]]; then
+        review_pattern="proposal-review-*.md"
+        review_step="proposal_review"
+    else
+        review_pattern="code-review-*.md"
+        review_step="code_review"
+    fi
+
+    local before_count after_count
+    before_count=$(find "${task_dir}" -name "$review_pattern" 2>/dev/null | wc -l | tr -d ' ')
+
+    local rc
+    set +e
+    if [[ "$review_type" == "proposal" ]]; then
+        review_proposal "$task_id"
+    else
+        review_code "$task_id"
+    fi
+    rc=$?
+    set -e
+
+    after_count=$(find "${task_dir}" -name "$review_pattern" 2>/dev/null | wc -l | tr -d ' ')
+    local latest_review_file=""
+    if [[ "$after_count" -gt "$before_count" ]]; then
+        latest_review_file=$(find "${task_dir}" -name "$review_pattern" -print | sort | tail -1)
+    else
+        latest_review_file=$(find "${task_dir}" -name "$review_pattern" -print | sort | tail -1)
+    fi
+
+    if [[ -n "$latest_review_file" && -f "$latest_review_file" ]]; then
+        cp "$latest_review_file" "$result_file"
+    fi
+
+    local review_state
+    review_state=$(jq -r --arg step "$review_step" '.steps[$step] // empty' "${task_dir}/meta.json")
+    local status="completed"
+    [[ $rc -ne 0 ]] && status="failed"
+
+    ts="$(date -Iseconds)"
+    review_job_update "$job_file" \
+        --arg status "$status" \
+        --arg ts "$ts" \
+        --argjson rc "$rc" \
+        --arg review_state "$review_state" \
+        --arg review_file "$latest_review_file" \
+        --arg result_file "$result_file" \
+        '.status = $status
+         | .completed_at = $ts
+         | .pid = null
+         | .exit_code = $rc
+         | .review_state = $review_state
+         | .review_file = (if $review_file == "" then null else $review_file end)
+         | .result_file = $result_file'
+
+    if [[ "$status" == "completed" ]]; then
+        echo -e "${GREEN}✓ 后台 review 完成: ${job_id}${NC}" >> "$log_file"
+    else
+        echo -e "${RED}✗ 后台 review 失败: ${job_id}${NC}" >> "$log_file"
+    fi
+
+    return 0
+}
+
+show_review_status() {
+    ensure_review_jobs_dir
+    local ref="${1:-}"
+
+    if [[ -n "$ref" && -f "$(review_job_file_path "$ref")" ]]; then
+        local job_file
+        job_file=$(review_job_file_path "$ref")
+        echo -e "${BLUE}=== Review Job: ${ref} ===${NC}"
+        jq '.' "$job_file"
+        local log_file
+        log_file=$(jq -r '.log_file // empty' "$job_file")
+        if [[ -n "$log_file" && -f "$log_file" ]]; then
+            echo ""
+            echo -e "${BLUE}最近日志:${NC}"
+            tail -n 20 "$log_file"
+        fi
+        return 0
+    fi
+
+    local files=("${REVIEW_JOBS_DIR}"/*.json)
+    if [[ ${#files[@]} -eq 0 || ! -e "${files[0]}" ]]; then
+        echo "暂无后台 review 作业"
+        return 0
+    fi
+
+    echo -e "${BLUE}=== Review Jobs ===${NC}"
+    printf "%-24s %-10s %-9s %-8s %-28s\n" "JOB_ID" "STATUS" "TYPE" "BACKEND" "TASK_ID"
+    for job_file in "${files[@]}"; do
+        local job_id status review_type backend task_id
+        job_id=$(jq -r '.job_id' "$job_file")
+        status=$(jq -r '.status' "$job_file")
+        review_type=$(jq -r '.review_type' "$job_file")
+        backend=$(jq -r '.backend' "$job_file")
+        task_id=$(jq -r '.task_id' "$job_file")
+
+        if [[ -n "$ref" && "$task_id" != "$ref" ]]; then
+            continue
+        fi
+        printf "%-24s %-10s %-9s %-8s %-28s\n" "$job_id" "$status" "$review_type" "$backend" "$task_id"
+    done
+}
+
+show_review_result() {
+    local job_id="${1:-}"
+    if [[ -z "$job_id" ]]; then
+        echo -e "${RED}错误: 请提供 job-id${NC}"
+        echo "用法: sparring review-result <job-id>"
+        return 1
+    fi
+
+    local job_file
+    job_file=$(review_job_file_path "$job_id")
+    if [[ ! -f "$job_file" ]]; then
+        echo -e "${RED}错误: review job 不存在: ${job_id}${NC}"
+        return 1
+    fi
+
+    local status result_file review_file
+    status=$(jq -r '.status' "$job_file")
+    result_file=$(jq -r '.result_file // empty' "$job_file")
+    review_file=$(jq -r '.review_file // empty' "$job_file")
+
+    if [[ "$status" == "queued" || "$status" == "running" ]]; then
+        echo -e "${YELLOW}作业尚未完成: ${job_id} (${status})${NC}"
+        echo "查看状态: sparring review-status ${job_id}"
+        return 0
+    fi
+
+    if [[ -n "$result_file" && -f "$result_file" ]]; then
+        cat "$result_file"
+        return 0
+    fi
+
+    if [[ -n "$review_file" && -f "$review_file" ]]; then
+        cat "$review_file"
+        return 0
+    fi
+
+    echo -e "${YELLOW}未找到 review 结果文件${NC}"
+    echo "查看详情: sparring review-status ${job_id}"
+}
+
+cancel_review_job() {
+    local job_id="${1:-}"
+    if [[ -z "$job_id" ]]; then
+        echo -e "${RED}错误: 请提供 job-id${NC}"
+        echo "用法: sparring review-cancel <job-id>"
+        return 1
+    fi
+
+    local job_file
+    job_file=$(review_job_file_path "$job_id")
+    if [[ ! -f "$job_file" ]]; then
+        echo -e "${RED}错误: review job 不存在: ${job_id}${NC}"
+        return 1
+    fi
+
+    local status pid
+    status=$(jq -r '.status' "$job_file")
+    pid=$(jq -r '.pid // empty' "$job_file")
+
+    if [[ "$status" != "queued" && "$status" != "running" ]]; then
+        echo -e "${YELLOW}作业不是运行态，无需取消: ${job_id} (${status})${NC}"
+        return 0
+    fi
+
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+    fi
+
+    local ts
+    ts="$(date -Iseconds)"
+    review_job_update "$job_file" \
+        --arg ts "$ts" \
+        '.status = "cancelled" | .completed_at = $ts | .pid = null'
+
+    echo -e "${GREEN}✓ 已取消 review job: ${job_id}${NC}"
+}
+
+# ─── Issue 同步 ──────────────────────────────────────────────
+
+# 如果任务关联了 issue，同步 comment（带身份标记）
+# Usage: sync_to_issue <task_dir> <agent_name> <phase_label> <body>
+# Example: sync_to_issue "$task_dir" "Cursor Agent" "Proposal Review" "$review_result"
+sync_to_issue() {
+    local task_dir="$1"
+    local agent_name="$2"
+    local phase_label="$3"
+    local body="$4"
+
+    local issue_number repo
+    issue_number=$(jq -r '.issue_number // empty' "${task_dir}/meta.json")
+    repo=$(jq -r '.repo // empty' "${task_dir}/meta.json")
+
+    [[ -z "$issue_number" || -z "$repo" ]] && return 0
+
+    local icon
+    case "$agent_name" in
+        *Claude*|*claude*) icon="🧠" ;;
+        *Cursor*|*cursor*) icon="🤖" ;;
+        *Codex*|*codex*)   icon="🧪" ;;
+        *GLM*|*glm*)       icon="🌟" ;;
+        *)                 icon="🔧" ;;
+    esac
+
+    local comment="${icon} **[${agent_name} — ${phase_label}]**
+
+${body}"
+
+    gh issue comment "$issue_number" --repo "$repo" --body "$comment" >/dev/null 2>&1 || {
+        echo -e "${DIM}  (Issue 同步失败，继续本地流程)${NC}" >&2
+    }
+}
+
+# ─── Agent 配置加载 ─────────────────────────────────────────
+
+# 从 agents/<name>.md 读取配置
+# 解析 model 和 system prompt
+load_agent_config() {
+    local agent_name="$1"
+    local config_file="${AGENTS_DIR}/${agent_name}.md"
+
+    AGENT_MODEL=""
+    AGENT_SYSTEM_PROMPT=""
+
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${DIM}  未找到 agent 配置: ${config_file}，使用默认值${NC}" >&2
+        AGENT_MODEL="gpt-5.3-codex"
+        return 0
+    fi
+
+    # 解析 model: 从 "model: xxx" 行提取
+    AGENT_MODEL=$(grep -E '^model:' "$config_file" | head -1 | sed 's/^model:[[:space:]]*//')
+    if [[ -z "$AGENT_MODEL" ]]; then
+        AGENT_MODEL="gpt-5.3-codex"
+    fi
+
+    # 解析 system prompt: ## System Prompt 之后的所有内容
+    local in_prompt=false
+    local prompt_lines=()
+    while IFS= read -r line; do
+        if [[ "$in_prompt" == true ]]; then
+            prompt_lines+=("$line")
+        elif [[ "$line" == "## System Prompt" ]]; then
+            in_prompt=true
+        fi
+    done < "$config_file"
+
+    if [[ ${#prompt_lines[@]} -gt 0 ]]; then
+        AGENT_SYSTEM_PROMPT=$(printf '%s\n' "${prompt_lines[@]}")
+        # 去掉开头的空行
+        AGENT_SYSTEM_PROMPT=$(echo "$AGENT_SYSTEM_PROMPT" | sed '/./,$!d')
+    fi
+}
+
+# ─── Agent 调用封装 ──────────────────────────────────────────
+
+_timeout_cmd() {
+    local duration="$1"
+    shift
+    if command -v timeout &>/dev/null; then
+        timeout "$duration" "$@"
+    elif command -v gtimeout &>/dev/null; then
+        gtimeout "$duration" "$@"
+    else
+        # macOS fallback: use perl
+        perl -e '
+            use POSIX ":sys_wait_h";
+            my $timeout = shift @ARGV;
+            my $pid = fork();
+            if ($pid == 0) { exec @ARGV; exit 1; }
+            eval {
+                local $SIG{ALRM} = sub { kill "TERM", $pid; die "timeout\n"; };
+                alarm $timeout;
+                waitpid($pid, 0);
+                alarm 0;
+            };
+            if ($@ eq "timeout\n") { exit 124; }
+            exit ($? >> 8);
+        ' "$duration" "$@"
+    fi
+}
+
+# 为任务初始化 cursor agent session（创建 chat 并存到 meta.json）
+init_agent_session() {
+    local task_dir="$1"
+    local backend
+    backend=$(get_review_backend) || return 1
+
+    # codex backend 不需要 cursor chat session
+    [[ "$backend" != "cursor" ]] && return 0
+
+    check_agent || return 1
+
+    local chat_id
+    chat_id=$(HTTP_PROXY= HTTPS_PROXY= agent create-chat 2>/dev/null)
+
+    if [[ -n "$chat_id" ]]; then
+        update_meta "$task_dir" --arg cid "$chat_id" '.agent_chat_id = $cid'
+        echo -e "${DIM}  已创建 Cursor Agent session: ${chat_id}${NC}" >&2
+    else
+        echo -e "${DIM}  无法创建 agent session，将使用独立会话${NC}" >&2
+    fi
+}
+
+call_cursor_agent() {
+    local prompt="$1"
+    local task_dir="${2:-}"
+    local result=""
+
+    check_agent || return 1
+
+    # 加载 cursor agent 配置
+    load_agent_config "cursor"
+
+    # 如果有 system prompt，拼到 prompt 前面
+    if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
+        prompt="<system>
+${AGENT_SYSTEM_PROMPT}
+</system>
+
+${prompt}"
+    fi
+
+    # 配置优先级: env (SPARRING_AGENT_MODEL / WORKFLOW_AGENT_MODEL) > config > agents/cursor.md
+    local model
+    model=$(_config_get cursor.model)
+    [[ -z "$model" ]] && model="$AGENT_MODEL"
+
+    # 读取 chat_id 用于 resume
+    local chat_id=""
+    if [[ -n "$task_dir" && -f "${task_dir}/meta.json" ]]; then
+        chat_id=$(jq -r '.agent_chat_id // empty' "${task_dir}/meta.json")
+    fi
+
+    local resume_args=()
+    if [[ -n "$chat_id" ]]; then
+        resume_args=(--resume "$chat_id")
+        echo -e "${DIM}  使用模型: ${model} | 恢复会话: ${chat_id:0:8}...${NC}" >&2
+    else
+        echo -e "${DIM}  使用模型: ${model} | 新会话${NC}" >&2
+    fi
+
+    local max_attempts
+    max_attempts=$(_agent_attempts)
+
+    for i in $(seq 1 $max_attempts); do
+        if [[ ${#resume_args[@]} -gt 0 ]]; then
+            result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "$(_agent_timeout)" \
+                agent --print --trust --model "$model" "${resume_args[@]}" "$prompt" 2>&1) && break
+        else
+            result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "$(_agent_timeout)" \
+                agent --print --trust --model "$model" "$prompt" 2>&1) && break
+        fi
+
+        if [[ $i -lt $max_attempts ]]; then
+            echo -e "${DIM}  agent 调用失败，重试 ($i/$max_attempts)...${NC}" >&2
+            sleep 2
+        else
+            echo -e "${RED}错误: agent 调用失败 (共 $max_attempts 次尝试)${NC}" >&2
+            echo -e "${DIM}  错误信息: $result${NC}" >&2
+            echo ""
+            return 1
+        fi
+    done
+
+    echo "$result"
+}
+
+call_codex_agent() {
+    local prompt="$1"
+    local max_attempts
+    max_attempts=$(_agent_attempts)
+    local result=""
+
+    check_codex || return 1
+
+    local model effort codex_home
+    model=$(_config_get codex.model)
+    effort=$(_config_get codex.effort)
+    codex_home=$(_config_get codex.home)
+    [[ -z "$codex_home" ]] && codex_home="${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}"
+    mkdir -p "$codex_home"
+
+    local output_file
+    output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-codex-out.XXXXXX")
+    local prompt_file
+    prompt_file=$(mktemp "${TMPDIR:-/tmp}/workflow-codex-prompt.XXXXXX")
+    local command_output_file
+    command_output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-codex-log.XXXXXX")
+
+    cat > "$prompt_file" <<EOF
+你在 Dual AI Workflow 中担任严格 reviewer。
+
+响应格式必须严格二选一：
+1) 通过时：
+APPROVE
+
+[1-2 句理由]
+
+2) 有问题时：
+CONCERNS
+
+1. [问题 + 影响 + 修复建议]
+2. ...
+
+始终用中文，且不要输出其他格式。
+
+${prompt}
+EOF
+
+    local codex_cmd=(codex exec --sandbox read-only --ephemeral --skip-git-repo-check --color never --output-last-message "$output_file")
+    if [[ -n "$model" ]]; then
+        codex_cmd+=(--model "$model")
+    fi
+    if [[ -n "$effort" ]]; then
+        codex_cmd+=(-c "model_reasoning_effort=\"$effort\"")
+    fi
+    codex_cmd+=(-)
+
+    local model_desc="${model:-default(config.toml)}"
+    local effort_desc="${effort:-default(config.toml)}"
+    echo -e "${DIM}  使用 Codex CLI | 模型: ${model_desc} | 推理: ${effort_desc}${NC}" >&2
+    echo -e "${DIM}  CODEX_HOME: ${codex_home}${NC}" >&2
+
+    for i in $(seq 1 $max_attempts); do
+        if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd "$(_agent_timeout)" \
+            "${codex_cmd[@]}" < "$prompt_file" > "$command_output_file" 2>&1; then
+            break
+        fi
+
+        if [[ $i -lt $max_attempts ]]; then
+            echo -e "${DIM}  codex 调用失败，重试 ($i/$max_attempts)...${NC}" >&2
+            sleep 2
+        else
+            local err_output
+            err_output=$(cat "$command_output_file" 2>/dev/null || true)
+            rm -f "$output_file" "$prompt_file" "$command_output_file"
+            echo -e "${RED}错误: codex 调用失败 (共 $max_attempts 次尝试)${NC}" >&2
+            echo -e "${DIM}  错误信息: $err_output${NC}" >&2
+            echo ""
+            return 1
+        fi
+    done
+
+    if [[ -s "$output_file" ]]; then
+        result=$(cat "$output_file")
+    else
+        result=$(cat "$command_output_file" 2>/dev/null || true)
+    fi
+
+    # 忽略 codex CLI 的 PATH 警告噪音
+    result=$(echo "$result" | sed '/^WARNING: proceeding, even though we could not update PATH:/d')
+
+    rm -f "$output_file" "$prompt_file" "$command_output_file"
+
+    if [[ -z "${result//[[:space:]]/}" ]]; then
+        echo -e "${RED}错误: codex 返回空结果${NC}" >&2
+        return 1
+    fi
+
+    echo "$result"
+}
+
+call_glm_agent() {
+    local prompt="$1"
+    local max_attempts
+    max_attempts=$(_agent_attempts)
+
+    check_glm || return 1
+
+    local api_base model thinking max_tokens temperature api_key
+    api_base=$(_config_get glm.api_base)
+    model=$(_config_get glm.model)
+    thinking=$(_config_get glm.thinking)
+    max_tokens=$(_config_get glm.max_tokens)
+    temperature=$(_config_get glm.temperature)
+    api_key=$(_config_get glm.api_key)
+
+    # 把 reviewer 指令前缀拼到用户 prompt，跟 codex 分支对齐
+    local full_prompt="你在 Dual AI Workflow 中担任严格 reviewer。
+
+响应格式必须严格二选一：
+1) 通过时：
+APPROVE
+
+[1-2 句理由]
+
+2) 有问题时：
+CONCERNS
+
+1. [问题 + 影响 + 修复建议]
+2. ...
+
+始终用中文，且不要输出其他格式。
+
+${prompt}"
+
+    echo -e "${DIM}  使用 GLM | 模型: ${model} | thinking: ${thinking}${NC}" >&2
+
+    local payload
+    payload=$(jq -n \
+        --arg model "$model" \
+        --arg content "$full_prompt" \
+        --arg thinking "$thinking" \
+        --argjson max_tokens "$max_tokens" \
+        --argjson temperature "$temperature" \
+        '{
+            model: $model,
+            messages: [{role: "user", content: $content}],
+            thinking: {type: $thinking},
+            max_tokens: $max_tokens,
+            temperature: $temperature
+        }')
+
+    local response_file
+    response_file=$(mktemp "${TMPDIR:-/tmp}/workflow-glm.XXXXXX")
+    local http_status=""
+    local result=""
+
+    for i in $(seq 1 $max_attempts); do
+        http_status=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "$(_agent_timeout)" \
+            curl -sS -w '%{http_code}' -o "$response_file" \
+                --connect-timeout 10 \
+                --max-time "$(_agent_timeout)" \
+                -X POST "${api_base}/chat/completions" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${api_key}" \
+                -d "$payload" 2>/dev/null) || http_status="000"
+
+        if [[ "$http_status" == "200" ]]; then
+            break
+        fi
+
+        if [[ $i -lt $max_attempts ]]; then
+            echo -e "${DIM}  glm 调用失败 (HTTP ${http_status})，重试 ($i/$max_attempts)...${NC}" >&2
+            sleep 2
+        else
+            local body
+            body=$(cat "$response_file" 2>/dev/null | head -c 300)
+            rm -f "$response_file"
+            echo -e "${RED}错误: glm 调用失败 (HTTP ${http_status}, 共 ${max_attempts} 次尝试)${NC}" >&2
+            [[ -n "$body" ]] && echo -e "${DIM}  响应: ${body}${NC}" >&2
+            return 1
+        fi
+    done
+
+    # GLM 响应：choices[0].message.content；空字符串时不应兜底到 reasoning_content
+    # （reasoning 不遵守 APPROVE/CONCERNS 格式，会让上层解析失败）
+    result=$(jq -r '.choices[0].message.content // empty' "$response_file" 2>/dev/null)
+    if [[ -z "${result//[[:space:]]/}" ]]; then
+        # content 为空字符串时，jq `//` 不会回退，手动检查 reasoning 提示用户调参
+        local has_reasoning
+        has_reasoning=$(jq -r '(.choices[0].message.reasoning_content // "") | length > 0' "$response_file" 2>/dev/null)
+        rm -f "$response_file"
+        if [[ "$has_reasoning" == "true" ]]; then
+            echo -e "${RED}错误: glm 返回空 content（finish_reason 可能是 length — reasoning 吃完了 max_tokens）${NC}" >&2
+            echo -e "${DIM}  建议: 调大 glm.max_tokens 到 65536 或关闭 glm.thinking${NC}" >&2
+        else
+            echo -e "${RED}错误: glm 返回空 content${NC}" >&2
+        fi
+        return 1
+    fi
+    rm -f "$response_file"
+
+    echo "$result"
+}
+
+# 底层：调用指定 backend
+_call_backend() {
+    local backend="$1"
+    local prompt="$2"
+    local task_dir="${3:-}"
+
+    case "$backend" in
+        cursor) call_cursor_agent "$prompt" "$task_dir" ;;
+        codex)  call_codex_agent "$prompt" "$task_dir" ;;
+        glm)    call_glm_agent "$prompt" "$task_dir" ;;
+        *)      echo -e "${RED}错误: 不支持的 reviewer backend: ${backend}${NC}" >&2; return 1 ;;
+    esac
+}
+
+call_reviewer() {
+    local prompt="$1"
+    local task_dir="${2:-}"
+    local primary fallback
+    primary=$(get_review_backend) || return 1
+    fallback=$(get_review_backend_fallback) || return 1
+
+    local result rc=0
+    result=$(_call_backend "$primary" "$prompt" "$task_dir") || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    if [[ -z "$fallback" ]]; then
+        return $rc
+    fi
+
+    if [[ "$fallback" == "$primary" ]]; then
+        echo -e "${DIM}  (fallback 与主 backend 相同: ${primary}，跳过降级)${NC}" >&2
+        return $rc
+    fi
+
+    local primary_label fallback_label
+    primary_label=$(reviewer_label_for_backend "$primary")
+    fallback_label=$(reviewer_label_for_backend "$fallback")
+    echo -e "${YELLOW}⚠ 主 backend ${primary_label} 调用失败，降级到 ${fallback_label}...${NC}" >&2
+
+    if result=$(_call_backend "$fallback" "$prompt" "$task_dir"); then
+        echo "$result"
+        return 0
+    fi
+
+    echo -e "${RED}错误: 主备 backend 均失败 (${primary_label} → ${fallback_label})${NC}" >&2
+    return 1
+}
+
+# backward compatibility: keep old function name
+call_agent() {
+    call_reviewer "$@"
+}
+
+# ─── 初始化 ─────────────────────────────────────────────────
+
+init_workflow() {
+    mkdir -p "${PLANS_DIR}"
+    mkdir -p "${REVIEW_JOBS_DIR}"
+
+    cat > "${WORKFLOW_DIR}/.gitignore" <<'EOF'
+*
+!.gitignore
+EOF
+
+    echo -e "${GREEN}✓ 工作流目录初始化完成: ${WORKFLOW_DIR}${NC}"
+    echo ""
+    echo "提示: .workflow 目录默认被 git 忽略"
+    echo "      如需团队共享，请修改 ${WORKFLOW_DIR}/.gitignore"
+}
+
+# ─── 创建任务 ────────────────────────────────────────────────
+
+create_task() {
+    local task_name="${1:-}"
+    local executor="${2:-}"
+
+    if [[ -z "$task_name" ]]; then
+        echo -e "${RED}错误: 请提供任务名称${NC}"
+        echo "用法: sparring create <task-name> <claude|cursor>"
+        exit 1
+    fi
+
+    validate_task_name "$task_name"
+
+    if [[ -z "$executor" ]]; then
+        executor="claude"
+    fi
+
+    validate_executor "$executor"
+
+    if [[ ! -d "${PLANS_DIR}" ]]; then
+        init_workflow
+    fi
+
+    local backend
+    backend=$(get_review_backend) || exit 1
+    local reviewer
+    reviewer=$(reviewer_name_for_backend "$backend")
+    local task_id
+    task_id="$(date +%Y%m%d-%H%M%S)-${task_name}"
+    local task_dir="${PLANS_DIR}/${task_id}"
+
+    mkdir -p "${task_dir}"
+
+    jq -n \
+        --arg id "$task_id" \
+        --arg name "$task_name" \
+        --arg exec "$executor" \
+        --arg rev "$reviewer" \
+        --arg ts "$(date -Iseconds)" \
+        '{
+            task_id: $id,
+            task_name: $name,
+            executor: $exec,
+            reviewer: $rev,
+            status: "proposal",
+            created_at: $ts,
+            steps: {
+                proposal: "pending",
+                proposal_review: "pending",
+                implementation: "pending",
+                code_review: "pending",
+                approved: "pending"
+            }
+        }' > "${task_dir}/meta.json"
+
+    cat > "${task_dir}/task.md" <<EOF
+# Task: ${task_name}
+
+## 任务描述
+[在此描述任务需求和目标]
+
+## 背景
+[提供必要的背景信息]
+
+## 预期结果
+[描述预期的交付结果]
+
+---
+**执行者**: ${executor}
+**观察者**: ${reviewer}
+EOF
+
+    # 初始化 Cursor Agent session
+    init_agent_session "${task_dir}"
+
+    echo -e "${GREEN}✓ 任务创建成功: ${task_id}${NC}"
+    echo -e "${BLUE}任务目录: ${task_dir}${NC}"
+    echo -e "${YELLOW}执行者: ${executor}  观察者: ${reviewer}${NC}"
+    echo -e "${DIM}审查后端: ${backend}${NC}"
+    echo ""
+    echo "下一步:"
+    echo "  1. 编辑任务描述: ${task_dir}/task.md"
+    echo "  2. 执行者开始写方案: sparring propose ${task_id}"
+}
+
+# ─── 写方案 ──────────────────────────────────────────────────
+
+propose() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+    local executor
+    executor=$(jq -r '.executor' "${task_dir}/meta.json")
+
+    echo -e "${BLUE}=== 方案阶段 ===${NC}"
+    echo -e "${YELLOW}执行者: ${executor}${NC}"
+    echo ""
+    echo "请为任务 ${task_id} 编写技术方案。"
+    echo ""
+    echo "  任务描述: ${task_dir}/task.md"
+    echo "  输出文件: ${task_dir}/proposal.md"
+    echo ""
+    echo "方案应包含: 技术设计、实现步骤、潜在风险、测试计划"
+
+    update_meta "$task_dir" '.steps.proposal = "in_progress"'
+}
+
+# ─── 自动 Review 方案 ────────────────────────────────────────
+
+review_proposal_bg() {
+    local task_id="${1:-}"
+    if [[ -z "$task_id" ]]; then
+        echo -e "${RED}错误: 请提供 task-id${NC}"
+        echo "用法: sparring review-proposal-bg <task-id>"
+        return 1
+    fi
+    start_background_review "proposal" "$task_id"
+}
+
+review_proposal() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+    local backend
+    backend=$(get_review_backend) || return 1
+
+    if [[ ! -f "${task_dir}/proposal.md" ]]; then
+        echo -e "${RED}错误: 方案文件不存在，请先编写 ${task_dir}/proposal.md${NC}"
+        return 1
+    fi
+
+    local reviewer
+    reviewer=$(jq -r '.reviewer' "${task_dir}/meta.json")
+    [[ -z "$reviewer" || "$reviewer" == "null" ]] && reviewer=$(reviewer_name_for_backend "$backend")
+    local reviewer_label
+    reviewer_label=$(reviewer_label_for_backend "$backend")
+    local review_count
+    review_count=$(find "${task_dir}" -name "proposal-review-*.md" 2>/dev/null | wc -l)
+    local review_num=$((review_count + 1))
+
+    echo -e "${BLUE}=== 方案 Review (第 ${review_num} 轮) ===${NC}"
+    echo -e "${YELLOW}观察者: ${reviewer_label}${NC}"
+    echo ""
+
+    local proposal_content
+    proposal_content=$(cat "${task_dir}/proposal.md")
+
+    local prompt="你正在 review 一份技术方案。
+
+任务: $(jq -r '.task_name' "${task_dir}/meta.json")
+
+方案内容:
+${proposal_content}
+
+请 review 并回复:
+- APPROVE: 如果方案合理可行
+- CONCERNS: <编号列表> 如果有问题
+
+重点: 架构合理性、可行性、边界情况、安全性。
+只提真正有问题的点，不要提远期优化建议或假设性场景防御。请用中文简洁回复。"
+
+    echo -e "${DIM}正在调用 ${reviewer_label} (${backend} backend) review...${NC}"
+
+    local review_result
+    if review_result=$(call_reviewer "$prompt" "$task_dir"); then
+        echo "$review_result" > "${task_dir}/proposal-review-${review_num}.md"
+        echo ""
+        echo -e "${GREEN}Review 结果:${NC}"
+        echo "$review_result"
+        echo ""
+
+        if echo "$review_result" | grep -qi "APPROVE"; then
+            echo -e "${GREEN}✓ 方案 Review 通过！${NC}"
+            update_meta "$task_dir" '.steps.proposal_review = "approved"'
+            sync_to_issue "$task_dir" "${reviewer_label}" "Proposal Review #${review_num} — APPROVED" "$review_result"
+        else
+            echo -e "${YELLOW}⚠ 有修改意见，请执行者处理后重新 review${NC}"
+            update_meta "$task_dir" '.steps.proposal_review = "needs_revision"'
+            sync_to_issue "$task_dir" "${reviewer_label}" "Proposal Review #${review_num} — NEEDS REVISION" "$review_result"
+        fi
+    else
+        echo -e "${YELLOW}⚠ ${reviewer_label} 调用失败，降级为手动 review${NC}"
+        echo ""
+        echo "请手动 review: ${task_dir}/proposal.md"
+        echo "并将结果保存到: ${task_dir}/proposal-review-${review_num}.md"
+        update_meta "$task_dir" '.steps.proposal_review = "manual"'
+    fi
+}
+
+# ─── 批准方案 ────────────────────────────────────────────────
+
+approve_proposal() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+
+    update_meta "$task_dir" \
+        '.steps.proposal = "done" | .steps.proposal_review = "approved" | .steps.implementation = "ready" | .status = "implementation"'
+
+    local executor
+    executor=$(jq -r '.executor' "${task_dir}/meta.json")
+    echo -e "${GREEN}✓ 方案已批准${NC}"
+    echo -e "${BLUE}=== 进入实现阶段 ===${NC}"
+    echo -e "${YELLOW}执行者 (${executor}) 可以开始实现代码${NC}"
+    echo ""
+    echo "下一步: sparring implement ${task_id}"
+
+    sync_to_issue "$task_dir" "Workflow" "Proposal Approved" "方案已批准，进入实现阶段。执行者: **${executor}**"
+}
+
+# ─── 实现代码 ────────────────────────────────────────────────
+
+implement() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+    local executor
+    executor=$(jq -r '.executor' "${task_dir}/meta.json")
+
+    echo -e "${BLUE}=== 实现阶段 ===${NC}"
+    echo -e "${YELLOW}执行者: ${executor}${NC}"
+    echo ""
+    echo "请根据方案实现代码。"
+    echo ""
+    echo "  方案文件: ${task_dir}/proposal.md"
+    echo ""
+    echo "实现完成后:"
+    echo "  git diff > ${task_dir}/changes.diff"
+    echo "  sparring review-code ${task_id}"
+
+    update_meta "$task_dir" '.steps.implementation = "in_progress"'
+}
+
+# ─── 自动 Review 代码 ────────────────────────────────────────
+
+review_code_bg() {
+    local task_id="${1:-}"
+    if [[ -z "$task_id" ]]; then
+        echo -e "${RED}错误: 请提供 task-id${NC}"
+        echo "用法: sparring review-code-bg <task-id>"
+        return 1
+    fi
+    start_background_review "code" "$task_id"
+}
+
+review_code() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+    local backend
+    backend=$(get_review_backend) || return 1
+
+    local reviewer
+    reviewer=$(jq -r '.reviewer' "${task_dir}/meta.json")
+    [[ -z "$reviewer" || "$reviewer" == "null" ]] && reviewer=$(reviewer_name_for_backend "$backend")
+    local reviewer_label
+    reviewer_label=$(reviewer_label_for_backend "$backend")
+    local review_count
+    review_count=$(find "${task_dir}" -name "code-review-*.md" 2>/dev/null | wc -l)
+    local review_num=$((review_count + 1))
+
+    echo -e "${BLUE}=== 代码 Review (第 ${review_num} 轮) ===${NC}"
+    echo -e "${YELLOW}观察者: ${reviewer_label}${NC}"
+    echo ""
+
+    local diff_content=""
+    if [[ -f "${task_dir}/changes.diff" ]]; then
+        diff_content=$(cat "${task_dir}/changes.diff")
+    else
+        diff_content=$(cd "$PROJECT_ROOT" && git diff 2>/dev/null || echo "(无法获取 diff)")
+    fi
+
+    if [[ -z "$diff_content" || "$diff_content" == "(无法获取 diff)" ]]; then
+        echo -e "${YELLOW}⚠ 未检测到代码改动${NC}"
+        echo "请先保存 diff: git diff > ${task_dir}/changes.diff"
+        return 1
+    fi
+
+    local prompt="你正在 review 代码实现。
+
+任务: $(jq -r '.task_name' "${task_dir}/meta.json")
+
+代码改动:
+${diff_content}
+
+请 review 并回复:
+- APPROVE: 如果代码质量良好
+- CONCERNS: <编号列表> 如果有问题
+
+重点: 正确性、安全性、边界 case、测试覆盖。
+只提真正有问题的点，不要提远期优化建议或假设性场景防御。请用中文简洁回复。"
+
+    echo -e "${DIM}正在调用 ${reviewer_label} (${backend} backend) review...${NC}"
+
+    local review_result
+    if review_result=$(call_reviewer "$prompt" "$task_dir"); then
+        echo "$review_result" > "${task_dir}/code-review-${review_num}.md"
+        echo ""
+        echo -e "${GREEN}Code Review 结果:${NC}"
+        echo "$review_result"
+        echo ""
+
+        if echo "$review_result" | grep -qi "APPROVE"; then
+            echo -e "${GREEN}✓ 代码 Review 通过！${NC}"
+            update_meta "$task_dir" '.steps.code_review = "approved"'
+            sync_to_issue "$task_dir" "${reviewer_label}" "Code Review #${review_num} — APPROVED" "$review_result"
+        else
+            echo -e "${YELLOW}⚠ 有修改意见，请执行者修复后重新 review${NC}"
+            update_meta "$task_dir" '.steps.code_review = "needs_revision"'
+            sync_to_issue "$task_dir" "${reviewer_label}" "Code Review #${review_num} — NEEDS REVISION" "$review_result"
+        fi
+    else
+        echo -e "${YELLOW}⚠ ${reviewer_label} 调用失败，降级为手动 review${NC}"
+        echo ""
+        echo "请手动 review 代码改动"
+        echo "并将结果保存到: ${task_dir}/code-review-${review_num}.md"
+        update_meta "$task_dir" '.steps.code_review = "manual"'
+    fi
+}
+
+# ─── 自动 Review 循环 ────────────────────────────────────────
+
+auto_review_proposal() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+    local executor
+    executor=$(jq -r '.executor' "${task_dir}/meta.json")
+
+    echo -e "${BLUE}=== 自动方案 Review 循环 ===${NC}"
+
+    for round in $(seq 1 $MAX_REVIEW_ROUNDS); do
+        echo ""
+        echo -e "${DIM}── 第 ${round} 轮 ──${NC}"
+
+        review_proposal "$task_id"
+
+        local status
+        status=$(jq -r '.steps.proposal_review' "${task_dir}/meta.json")
+
+        if [[ "$status" == "approved" ]]; then
+            echo ""
+            echo -e "${GREEN}✓ 方案经过 ${round} 轮 review 后通过！${NC}"
+            return 0
+        fi
+
+        if [[ "$status" == "manual" ]]; then
+            echo -e "${YELLOW}降级为手动模式，请手动处理${NC}"
+            return 1
+        fi
+
+        if [[ $round -lt $MAX_REVIEW_ROUNDS ]]; then
+            echo ""
+            echo -e "${YELLOW}执行者 (${executor}) 正在根据反馈修改方案...${NC}"
+            # 在 Skill 自动化模式下，执行者会自动处理
+            # 在 CLI 手动模式下，需要用户手动修改
+            if [[ "${AUTO_MODE:-}" != "true" ]]; then
+                echo "请修改方案后重新运行: sparring review-proposal ${task_id}"
+                return 0
+            fi
+        fi
+    done
+
+    echo -e "${RED}⚠ ${MAX_REVIEW_ROUNDS} 轮后仍未通过，请人工介入${NC}"
+    return 1
+}
+
+auto_review_code() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+    local executor
+    executor=$(jq -r '.executor' "${task_dir}/meta.json")
+
+    echo -e "${BLUE}=== 自动代码 Review 循环 ===${NC}"
+
+    for round in $(seq 1 $MAX_REVIEW_ROUNDS); do
+        echo ""
+        echo -e "${DIM}── 第 ${round} 轮 ──${NC}"
+
+        review_code "$task_id"
+
+        local status
+        status=$(jq -r '.steps.code_review' "${task_dir}/meta.json")
+
+        if [[ "$status" == "approved" ]]; then
+            echo ""
+            echo -e "${GREEN}✓ 代码经过 ${round} 轮 review 后通过！${NC}"
+            return 0
+        fi
+
+        if [[ "$status" == "manual" ]]; then
+            echo -e "${YELLOW}降级为手动模式，请手动处理${NC}"
+            return 1
+        fi
+
+        if [[ $round -lt $MAX_REVIEW_ROUNDS ]]; then
+            echo ""
+            echo -e "${YELLOW}执行者 (${executor}) 正在根据反馈修复代码...${NC}"
+            if [[ "${AUTO_MODE:-}" != "true" ]]; then
+                echo "请修复后重新运行: sparring review-code ${task_id}"
+                return 0
+            fi
+        fi
+    done
+
+    echo -e "${RED}⚠ ${MAX_REVIEW_ROUNDS} 轮后仍未通过，请人工介入${NC}"
+    return 1
+}
+
+# ─── 最终批准 ────────────────────────────────────────────────
+
+approve_final() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+
+    update_meta "$task_dir" \
+        '.steps.code_review = "approved" | .steps.approved = "yes" | .status = "completed" | .completed_at = "'"$(date -Iseconds)"'"'
+
+    echo -e "${GREEN}✓✓✓ 任务完成！${NC}"
+    echo ""
+    echo "  方案: ${task_dir}/proposal.md"
+    echo "  审查: ${task_dir}/"
+    echo ""
+    echo -e "${YELLOW}现在可以提交代码:${NC}"
+    echo "  git add ."
+    echo "  git commit"
+    echo "  git push"
+
+    sync_to_issue "$task_dir" "Workflow" "Task Completed" "任务已完成，所有 review 通过。准备提交代码。"
+}
+
+# ─── GitHub Issue 工具函数 ─────────────────────────────────────
+
+# 从 git remote 获取 owner/repo
+detect_repo() {
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null) || {
+        echo -e "${RED}错误: 无法获取 git remote origin${NC}" >&2
+        return 1
+    }
+    # 支持 SSH 和 HTTPS 格式
+    echo "$remote_url" | sed -E 's|.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$|\1|'
+}
+
+# 获取 issue 的 project item ID（用于更新看板状态）
+get_project_item_id() {
+    local issue_number="$1"
+
+    # 没有 project 配置时直接跳过
+    [[ -z "$ISSUE_PROJECT_OWNER" || -z "$ISSUE_PROJECT_NUMBER" ]] && return 1
+
+    local repo
+    repo=$(detect_repo)
+
+    gh api graphql -f query='
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          projectItems(first: 10) {
+            nodes {
+              id
+              project { number }
+            }
+          }
+        }
+      }
+    }' -f owner="${ISSUE_PROJECT_OWNER}" -f repo="${repo##*/}" -F number="$issue_number" \
+        --jq ".data.repository.issue.projectItems.nodes[] | select(.project.number == ${ISSUE_PROJECT_NUMBER}) | .id" 2>/dev/null
+}
+
+# 更新 issue 在 project board 上的状态
+update_project_status() {
+    local issue_number="$1"
+    local target_status="$2"
+
+    local item_id
+    item_id=$(get_project_item_id "$issue_number")
+    if [[ -z "$item_id" ]]; then
+        echo -e "${YELLOW}⚠ 未找到 issue #${issue_number} 在 project 中的条目，跳过状态更新${NC}" >&2
+        return 1
+    fi
+
+    # 获取 project ID 和 Status 字段 ID
+    local project_data
+    project_data=$(gh api graphql -f query='
+    query($owner: String!, $number: Int!) {
+      organization(login: $owner) {
+        projectV2(number: $number) {
+          id
+          field(name: "Status") {
+            ... on ProjectV2SingleSelectField {
+              id
+              options { id name }
+            }
+          }
+        }
+      }
+    }' -f owner="${ISSUE_PROJECT_OWNER}" -F number="${ISSUE_PROJECT_NUMBER}" 2>/dev/null)
+
+    local project_id
+    project_id=$(echo "$project_data" | jq -r '.data.organization.projectV2.id')
+    local field_id
+    field_id=$(echo "$project_data" | jq -r '.data.organization.projectV2.field.id')
+    local option_id
+    option_id=$(echo "$project_data" | jq -r --arg status "$target_status" \
+        '.data.organization.projectV2.field.options[] | select(.name == $status) | .id')
+
+    if [[ -z "$project_id" || -z "$field_id" || -z "$option_id" ]]; then
+        echo -e "${YELLOW}⚠ 无法解析 project 字段信息，跳过状态更新${NC}" >&2
+        return 1
+    fi
+
+    gh api graphql -f query='
+    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId
+        itemId: $itemId
+        fieldId: $fieldId
+        value: { singleSelectOptionId: $optionId }
+      }) {
+        projectV2Item { id }
+      }
+    }' -f projectId="$project_id" -f itemId="$item_id" -f fieldId="$field_id" -f optionId="$option_id" \
+        >/dev/null 2>&1
+
+    if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}✓ Issue #${issue_number} 状态已更新为: ${target_status}${NC}"
+    else
+        echo -e "${YELLOW}⚠ 状态更新失败${NC}" >&2
+        return 1
+    fi
+}
+
+# ─── Issue 轮询 ──────────────────────────────────────────────
+
+issue_poll() {
+    local repo
+    repo=$(detect_repo) || return 1
+
+    echo -e "${BLUE}=== 扫描可认领的 Issue ===${NC}"
+    echo -e "${DIM}仓库: ${repo}  标签: ${ISSUE_LABEL}${NC}"
+    echo ""
+
+    local issues
+    issues=$(gh issue list --repo "$repo" --label "${ISSUE_LABEL}" --state open \
+        --json number,title,labels,assignees,body 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}错误: 无法获取 issues${NC}"
+        echo "$issues"
+        return 1
+    fi
+
+    local count
+    count=$(echo "$issues" | jq 'length')
+
+    if [[ "$count" -eq 0 ]]; then
+        echo "没有找到带 '${ISSUE_LABEL}' 标签的 open issue。"
+        return 0
+    fi
+
+    echo -e "${GREEN}找到 ${count} 个候选 issue:${NC}"
+    echo ""
+
+    echo "$issues" | jq -r '.[] | "  #\(.number) \(.title)\n    labels: \([.labels[].name] | join(", "))\n    assignees: \(if .assignees | length > 0 then [.assignees[].login] | join(", ") else "none" end)\n"'
+}
+
+# ─── Issue 认领 ──────────────────────────────────────────────
+
+issue_claim() {
+    local issue_number="${1:-}"
+    if [[ -z "$issue_number" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号${NC}"
+        echo "用法: sparring issue-claim <number>"
+        return 1
+    fi
+
+    local backend
+    backend=$(get_review_backend) || return 1
+    local reviewer
+    reviewer=$(reviewer_name_for_backend "$backend")
+    local reviewer_label
+    reviewer_label=$(reviewer_label_for_backend "$backend")
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    echo -e "${BLUE}=== 认领 Issue #${issue_number} ===${NC}"
+
+    # 检查 issue 是否存在且有 claude-ok label
+    local issue_data
+    issue_data=$(gh issue view "$issue_number" --repo "$repo" \
+        --json number,title,labels,assignees,body,state 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}错误: 无法获取 issue #${issue_number}${NC}"
+        echo "$issue_data"
+        return 1
+    fi
+
+    local title
+    title=$(echo "$issue_data" | jq -r '.title')
+    local has_label
+    has_label=$(echo "$issue_data" | jq -r --arg label "${ISSUE_LABEL}" \
+        '[.labels[].name] | any(. == $label)')
+
+    if [[ "$has_label" != "true" ]]; then
+        echo -e "${YELLOW}⚠ Issue #${issue_number} 没有 '${ISSUE_LABEL}' 标签${NC}"
+        echo "继续认领？(y/n)"
+        read -rp "> " confirm
+        [[ "$confirm" != "y" ]] && return 0
+    fi
+
+    # 更新 project board 状态为 In progress
+    echo -e "${DIM}更新看板状态...${NC}"
+    update_project_status "$issue_number" "In progress"
+
+    # 检测模式
+    local is_yolo
+    is_yolo=$(echo "$issue_data" | jq -r '[.labels[].name] | any(. == "yolo")')
+    local mode="normal"
+    [[ "$is_yolo" == "true" ]] && mode="yolo"
+
+    # 发布认领 comment
+    local claim_body="🤖 **Claude Code 已认领此任务**
+
+- 模式: $([ "$mode" = "yolo" ] && echo "🚀 YOLO (全自动)" || echo "👥 Normal (协作式)")
+- 审查后端: ${reviewer_label}
+- 开始时间: $(date '+%Y-%m-%d %H:%M')
+
+正在分析 issue 内容..."
+
+    local comment_url
+    comment_url=$(gh issue comment "$issue_number" --repo "$repo" --body "$claim_body" 2>&1)
+
+    if [[ $? -eq 0 ]]; then
+        echo -e "${GREEN}✓ 已认领 Issue #${issue_number}: ${title}${NC}"
+        echo -e "${YELLOW}模式: ${mode}${NC}"
+    else
+        echo -e "${RED}认领 comment 发布失败${NC}"
+        echo "$comment_url"
+        return 1
+    fi
+
+    # 创建本地 workflow 任务
+    if [[ ! -d "${PLANS_DIR}" ]]; then
+        init_workflow
+    fi
+
+    local task_name
+    task_name=$(echo "$title" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | cut -c1-50)
+    local task_id
+    task_id="$(date +%Y%m%d-%H%M%S)-issue-${issue_number}"
+    local task_dir="${PLANS_DIR}/${task_id}"
+
+    mkdir -p "${task_dir}"
+
+    local body
+    body=$(echo "$issue_data" | jq -r '.body')
+
+    jq -n \
+        --arg id "$task_id" \
+        --arg name "$task_name" \
+        --arg ts "$(date -Iseconds)" \
+        --arg mode "$mode" \
+        --arg reviewer "$reviewer" \
+        --argjson issue_number "$issue_number" \
+        --arg repo "$repo" \
+        '{
+            task_id: $id,
+            task_name: $name,
+            executor: "claude",
+            reviewer: $reviewer,
+            mode: $mode,
+            status: "proposal",
+            issue_number: $issue_number,
+            repo: $repo,
+            created_at: $ts,
+            steps: {
+                proposal: "pending",
+                proposal_review: "pending",
+                implementation: "pending",
+                code_review: "pending",
+                approved: "pending"
+            }
+        }' > "${task_dir}/meta.json"
+
+    # 保存 issue 内容为 task.md
+    cat > "${task_dir}/task.md" <<EOF
+# Issue #${issue_number}: ${title}
+
+${body}
+
+---
+**执行者**: claude
+**观察者**: ${reviewer_label}
+**模式**: ${mode}
+**Issue**: https://github.com/${repo}/issues/${issue_number}
+EOF
+
+    # 初始化 Cursor Agent session
+    init_agent_session "${task_dir}"
+
+    echo ""
+    echo -e "${GREEN}本地任务已创建: ${task_id}${NC}"
+    echo -e "${BLUE}任务目录: ${task_dir}${NC}"
+    echo ""
+    echo "下一步:"
+    if [[ "$mode" == "yolo" ]]; then
+        echo "  YOLO 模式 — 直接开始方案和实现"
+    else
+        echo "  Normal 模式 — 在 issue comment 中与用户讨论方案"
+        echo "  sparring issue-comment ${issue_number} \"你的 comment 内容\""
+        echo "  sparring issue-read ${issue_number}  # 读取最新 comments"
+    fi
+}
+
+# ─── Issue Comment 操作 ──────────────────────────────────────
+
+issue_comment() {
+    local issue_number="${1:-}"
+    local body="${2:-}"
+
+    if [[ -z "$issue_number" || -z "$body" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号和 comment 内容${NC}"
+        echo "用法: sparring issue-comment <number> <body>"
+        echo "  或:  sparring issue-comment <number> @file.md  (从文件读取)"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    # 支持从文件读取 comment 内容
+    if [[ "$body" == @* ]]; then
+        local file="${body:1}"
+        if [[ ! -f "$file" ]]; then
+            echo -e "${RED}错误: 文件不存在: ${file}${NC}"
+            return 1
+        fi
+        body=$(cat "$file")
+    fi
+
+    local result
+    result=$(gh issue comment "$issue_number" --repo "$repo" --body "$body" 2>&1)
+
+    if [[ $? -eq 0 ]]; then
+        # 提取 comment URL
+        local comment_url
+        comment_url=$(echo "$result" | grep -oE 'https://github.com/[^ ]+' | head -1)
+        echo -e "${GREEN}✓ Comment 已发布到 Issue #${issue_number}${NC}"
+        if [[ -n "$comment_url" ]]; then
+            echo -e "${BLUE}${comment_url}${NC}"
+        fi
+    else
+        echo -e "${RED}Comment 发布失败${NC}"
+        echo "$result"
+        return 1
+    fi
+}
+
+# ─── 读取 Issue Comments ─────────────────────────────────────
+
+issue_read() {
+    local issue_number="${1:-}"
+    local count="${2:-5}"
+
+    if [[ -z "$issue_number" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号${NC}"
+        echo "用法: sparring issue-read <number> [count]"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    echo -e "${BLUE}=== Issue #${issue_number} Comments (最近 ${count} 条) ===${NC}"
+    echo ""
+
+    local comments
+    comments=$(gh issue view "$issue_number" --repo "$repo" --json comments \
+        --jq ".comments | .[-${count}:]" 2>&1)
+
+    if [[ $? -ne 0 ]]; then
+        echo -e "${RED}错误: 无法读取 comments${NC}"
+        echo "$comments"
+        return 1
+    fi
+
+    local len
+    len=$(echo "$comments" | jq 'length')
+
+    if [[ "$len" -eq 0 ]]; then
+        echo "暂无 comments。"
+        return 0
+    fi
+
+    echo "$comments" | jq -r '.[] | "── \(.author.login) (\(.createdAt | split("T")[0])) ──\n\(.body)\n"'
+}
+
+# ─── 等待 Issue 回复 ─────────────────────────────────────────
+
+issue_wait_reply() {
+    local issue_number="${1:-}"
+    local since_comment_count="${2:-}"
+
+    if [[ -z "$issue_number" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号${NC}"
+        echo "用法: sparring issue-wait-reply <number> [since_comment_count]"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    # 记录当前 comment 数量
+    if [[ -z "$since_comment_count" ]]; then
+        since_comment_count=$(gh issue view "$issue_number" --repo "$repo" \
+            --json comments --jq '.comments | length' 2>/dev/null)
+    fi
+
+    echo -e "${BLUE}等待 Issue #${issue_number} 的新回复...${NC}"
+    echo -e "${DIM}当前 comment 数: ${since_comment_count}，每 ${ISSUE_POLL_INTERVAL}s 检查一次${NC}"
+    echo ""
+
+    local elapsed=0
+    local max_wait=600  # 10 分钟
+
+    while [[ $elapsed -lt $max_wait ]]; do
+        sleep "${ISSUE_POLL_INTERVAL}"
+        elapsed=$((elapsed + ISSUE_POLL_INTERVAL))
+
+        local current_count
+        current_count=$(gh issue view "$issue_number" --repo "$repo" \
+            --json comments --jq '.comments | length' 2>/dev/null)
+
+        if [[ "$current_count" -gt "$since_comment_count" ]]; then
+            echo -e "${GREEN}✓ 收到新回复！${NC}"
+            echo ""
+
+            # 获取新增的 comments
+            local new_count=$((current_count - since_comment_count))
+            gh issue view "$issue_number" --repo "$repo" --json comments \
+                --jq ".comments | .[-${new_count}:][] | \"── \\(.author.login) ──\\n\\(.body)\\n\""
+
+            return 0
+        fi
+
+        echo -e "${DIM}  [${elapsed}s] 暂无新回复...${NC}"
+    done
+
+    echo -e "${YELLOW}⚠ 等待 ${max_wait}s 后仍无回复${NC}"
+    return 1
+}
+
+# ─── Issue 完成 — 更新状态到 Reviewing ────────────────────────
+
+issue_done() {
+    local issue_number="${1:-}"
+    local pr_url="${2:-}"
+
+    if [[ -z "$issue_number" ]]; then
+        echo -e "${RED}错误: 请提供 issue 编号${NC}"
+        echo "用法: sparring issue-done <number> [pr_url]"
+        return 1
+    fi
+
+    local repo
+    repo=$(detect_repo) || return 1
+
+    # 更新看板状态
+    update_project_status "$issue_number" "Reviewing"
+
+    # 发布完成 comment
+    local done_body="🔗 **PR 已创建**: ${pr_url:-"(手动创建)"}
+
+任务已移至 **Reviewing** 状态，请 review。"
+
+    gh issue comment "$issue_number" --repo "$repo" --body "$done_body" >/dev/null 2>&1
+
+    echo -e "${GREEN}✓ Issue #${issue_number} 已移至 Reviewing${NC}"
+}
+
+# ─── 列出任务 ────────────────────────────────────────────────
+
+list_tasks() {
+    echo -e "${BLUE}=== 所有任务 ===${NC}"
+    echo ""
+
+    if [[ ! -d "${PLANS_DIR}" ]] || [[ -z "$(ls -A "${PLANS_DIR}" 2>/dev/null)" ]]; then
+        echo "暂无任务"
+        return
+    fi
+
+    for task_dir in "${PLANS_DIR}"/*; do
+        if [[ -f "${task_dir}/meta.json" ]]; then
+            local task_id
+            task_id=$(basename "$task_dir")
+            local task_name status executor
+            task_name=$(jq -r '.task_name' "${task_dir}/meta.json")
+            status=$(jq -r '.status' "${task_dir}/meta.json")
+            executor=$(jq -r '.executor' "${task_dir}/meta.json")
+
+            echo -e "${YELLOW}${task_id}${NC}"
+            echo "  名称: ${task_name}  状态: ${status}  执行者: ${executor}"
+            echo ""
+        fi
+    done
+}
+
+# ─── 显示状态 ────────────────────────────────────────────────
+
+show_status() {
+    local task_id="${1:-}"
+    validate_task_exists "$task_id"
+    local task_dir="${PLANS_DIR}/${task_id}"
+
+    echo -e "${BLUE}=== 任务状态: ${task_id} ===${NC}"
+    echo ""
+    jq '.' "${task_dir}/meta.json"
+    echo ""
+    echo -e "${BLUE}文件列表:${NC}"
+    ls -lh "${task_dir}/"
+}
+
+# ─── Config 子命令 ──────────────────────────────────────────
+
+# 返回给用户看的配置视图：合并后 + key 字段做掩码
+_config_masked_view() {
+    _config_merged | jq '
+        def mask(v):
+            if v == null or v == "" then v
+            else
+                (v | tostring) as $s
+                | if ($s | length) <= 8 then "***"
+                  else ($s[0:4]) + "***" + ($s[-4:])
+                  end
+            end;
+        (.glm.api_key |= mask(.))
+    '
+}
+
+config_show() {
+    echo -e "${BLUE}=== Sparring 配置（合并后）===${NC}"
+    echo ""
+    echo -e "${DIM}优先级: env (SPARRING_*/WORKFLOW_*) > project (.sparring/config.json) > global (~/.config/sparring/config.json) > 默认${NC}"
+    echo ""
+    _config_masked_view
+    echo ""
+    echo -e "${BLUE}配置文件:${NC}"
+    echo "  global:  ${CONFIG_FILE_GLOBAL} $([[ -f "$CONFIG_FILE_GLOBAL" ]] && echo "(存在)" || echo "(未创建)")"
+    echo "  project: ${CONFIG_FILE_PROJECT} $([[ -f "$CONFIG_FILE_PROJECT" ]] && echo "(存在)" || echo "(未创建)")"
+}
+
+config_path() {
+    echo "global:  ${CONFIG_FILE_GLOBAL}"
+    echo "project: ${CONFIG_FILE_PROJECT}"
+}
+
+config_get_cmd() {
+    local path="${1:-}"
+    if [[ -z "$path" ]]; then
+        echo -e "${RED}错误: 请提供 key 路径${NC}" >&2
+        echo "用法: sparring config get <key.path>" >&2
+        echo "示例: sparring config get glm.api_key" >&2
+        return 1
+    fi
+    local val
+    val=$(_config_get "$path")
+    # 敏感字段打掩码
+    case "$path" in
+        *api_key|*token|*secret*)
+            if [[ -n "$val" && ${#val} -gt 8 ]]; then
+                val="${val:0:4}***${val: -4}"
+            elif [[ -n "$val" ]]; then
+                val="***"
+            fi
+            ;;
+    esac
+    echo "$val"
+}
+
+config_init() {
+    local project_mode=false
+    local force=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--scope-project|project) project_mode=true; shift ;;
+            -g|--scope-global|global) project_mode=false; shift ;;
+            -f|--force) force=true; shift ;;
+            *) echo -e "${RED}未知选项: $1${NC}" >&2; return 1 ;;
+        esac
+    done
+
+    local target dir
+    if $project_mode; then
+        target="$CONFIG_FILE_PROJECT"
+        dir="$CONFIG_DIR_PROJECT"
+    else
+        target="$CONFIG_FILE_GLOBAL"
+        dir="$CONFIG_DIR_GLOBAL"
+    fi
+
+    if [[ -f "$target" ]] && ! $force; then
+        echo -e "${YELLOW}配置已存在: ${target}${NC}"
+        echo "  加 --force 覆盖，或直接编辑该文件。"
+        return 0
+    fi
+
+    mkdir -p "$dir"
+
+    if $project_mode; then
+        # 项目级：只放 backend 选型，绝不放 api_key。
+        # 项目级配置不支持 secrets 文件 — api_key 只能放全局 config 或 SPARRING_GLM_API_KEY env。
+        cat > "$target" <<'EOF'
+{
+  "_comment": "项目级 Sparring 配置（团队共享）。切勿在这里填 api_key — 项目 config 只支持 backend 选型等非敏感字段。api_key 放全局 ~/.config/sparring/config.json 或 SPARRING_GLM_API_KEY 环境变量。",
+  "review": {
+    "backend": "cursor",
+    "fallback": "glm"
+  }
+}
+EOF
+        # 安全追加 .gitignore：存在则只补齐缺失规则，不覆盖用户现有规则
+        local gi="${dir}/.gitignore"
+        local want_rules=("*.local.json" "*.secret.json")
+        if [[ -f "$gi" ]]; then
+            for rule in "${want_rules[@]}"; do
+                if ! grep -Fxq "$rule" "$gi" 2>/dev/null; then
+                    printf '%s\n' "$rule" >> "$gi"
+                fi
+            done
+        else
+            {
+                echo "# Sparring — 屏蔽可能含敏感信息的本地/衍生文件"
+                echo "# 注意: api_key 只应放在全局 ~/.config/sparring/config.json 或 SPARRING_GLM_API_KEY 环境变量"
+                echo "# 项目级 config.json 默认入库用于团队共享"
+                printf '%s\n' "${want_rules[@]}"
+            } > "$gi"
+        fi
+        echo -e "${GREEN}✓ 项目级配置已创建: ${target}${NC}"
+        echo "  ${dir}/.gitignore 已就绪（屏蔽 *.local.json / *.secret.json）"
+        echo -e "${YELLOW}  ⚠ 不要在 ${target} 里填 api_key — 项目 config 只支持非敏感字段${NC}"
+        echo "  api_key 放全局: sparring config init  或  export SPARRING_GLM_API_KEY=..."
+    else
+        # 全局：含 key 占位符。chmod 600
+        cat > "$target" <<'EOF'
+{
+  "_comment": "全局 Sparring 配置。含 API key，已 chmod 600。不要入库。",
+  "review": {
+    "backend": "cursor",
+    "fallback": "glm",
+    "timeout": 60,
+    "retries": 1
+  },
+  "glm": {
+    "api_key": "",
+    "model": "glm-5.1",
+    "thinking": "disabled"
+  }
+}
+EOF
+        chmod 600 "$target"
+        echo -e "${GREEN}✓ 全局配置已创建: ${target}${NC} (chmod 600)"
+        echo "  编辑该文件填入 glm.api_key，或用 SPARRING_GLM_API_KEY 环境变量。"
+        echo "  获取 GLM key: https://open.bigmodel.cn/usercenter/apikeys"
+    fi
+}
+
+config_cmd() {
+    local sub="${1:-show}"
+    shift 2>/dev/null || true
+    case "$sub" in
+        show)   config_show "$@" ;;
+        path)   config_path "$@" ;;
+        get)    config_get_cmd "$@" ;;
+        init)   config_init "$@" ;;
+        *)
+            echo -e "${RED}未知子命令: ${sub}${NC}" >&2
+            echo "用法: sparring config <show|path|get|init>" >&2
+            return 1
+            ;;
+    esac
+}
+
+# ─── 验证环境 ────────────────────────────────────────────────
+
+_verify_cursor() {
+    local ok=true
+    echo -n "agent (Cursor CLI): "
+    if command -v agent &>/dev/null; then
+        echo -e "${GREEN}✓ $(agent --version 2>/dev/null || echo 'installed')${NC}"
+    else
+        echo -e "${RED}✗ 未安装${NC}"
+        return 1
+    fi
+
+    load_agent_config "cursor"
+    local verify_model
+    verify_model=$(_config_get cursor.model)
+    [[ -z "$verify_model" ]] && verify_model="$AGENT_MODEL"
+    echo -e "  配置文件: ${AGENTS_DIR}/cursor.md"
+    echo -e "  模型: ${verify_model}"
+    if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
+        echo -e "  System prompt: $(echo "$AGENT_SYSTEM_PROMPT" | wc -l | tr -d ' ') 行"
+    else
+        echo -e "  System prompt: (无)"
+    fi
+
+    echo -n "  连通性: "
+    local result
+    if result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd 15 agent --print --trust --model "$verify_model" "Reply with only: OK" 2>&1); then
+        if echo "$result" | grep -qi "OK"; then
+            echo -e "${GREEN}✓ 正常${NC}"
+        else
+            echo -e "${YELLOW}? 有响应但内容异常: ${result:0:50}${NC}"
+        fi
+    else
+        echo -e "${RED}✗ 连接失败${NC}"
+        echo -e "${DIM}  提示: 检查网络和代理配置${NC}"
+        return 1
+    fi
+    $ok
+}
+
+_verify_codex() {
+    echo -n "codex CLI: "
+    if command -v codex &>/dev/null; then
+        echo -e "${GREEN}✓ $(codex --version 2>/dev/null | head -1)${NC}"
+    else
+        echo -e "${RED}✗ 未安装${NC}"
+        return 1
+    fi
+
+    local codex_model codex_effort codex_home
+    codex_model=$(_config_get codex.model)
+    codex_effort=$(_config_get codex.effort)
+    codex_home=$(_config_get codex.home)
+    [[ -z "$codex_home" ]] && codex_home="${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}"
+    mkdir -p "$codex_home"
+    echo -e "  模型: ${codex_model:-default(config.toml)}"
+    echo -e "  推理: ${codex_effort:-default(config.toml)}"
+    echo -e "  CODEX_HOME: ${codex_home}"
+
+    echo -n "  连通性: "
+    local output_file command_output_file
+    output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-codex-out.XXXXXX")
+    command_output_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-codex-log.XXXXXX")
+
+    local codex_cmd=(codex exec --sandbox read-only --ephemeral --skip-git-repo-check --color never --output-last-message "$output_file")
+    [[ -n "$codex_model" ]] && codex_cmd+=(--model "$codex_model")
+    [[ -n "$codex_effort" ]] && codex_cmd+=(-c "model_reasoning_effort=\"$codex_effort\"")
+    codex_cmd+=("Reply with only: OK")
+
+    local codex_ok=true
+    if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd 20 "${codex_cmd[@]}" < /dev/null > "$command_output_file" 2>&1; then
+        local codex_result
+        if [[ -s "$output_file" ]]; then
+            codex_result=$(cat "$output_file")
+        else
+            codex_result=$(cat "$command_output_file" 2>/dev/null || true)
+        fi
+        codex_result=$(echo "$codex_result" | sed '/^WARNING: proceeding, even though we could not update PATH:/d')
+
+        if echo "$codex_result" | grep -qi "OK"; then
+            echo -e "${GREEN}✓ 正常${NC}"
+        else
+            echo -e "${YELLOW}? 有响应但内容异常: ${codex_result:0:80}${NC}"
+        fi
+    else
+        codex_ok=false
+    fi
+
+    if [[ "$codex_ok" != "true" ]]; then
+        local codex_err
+        codex_err=$(cat "$command_output_file" 2>/dev/null || true)
+        echo -e "${RED}✗ 连接失败${NC}"
+        echo -e "${DIM}  错误: ${codex_err:0:120}${NC}"
+        echo -e "${DIM}  提示: 先执行 codex login${NC}"
+        rm -f "$output_file" "$command_output_file"
+        return 1
+    fi
+
+    rm -f "$output_file" "$command_output_file"
+    return 0
+}
+
+_verify_glm() {
+    echo -n "curl: "
+    if command -v curl &>/dev/null; then
+        echo -e "${GREEN}✓ $(curl --version | head -1 | awk '{print $2}')${NC}"
+    else
+        echo -e "${RED}✗ 未安装${NC}"
+        return 1
+    fi
+
+    local api_key api_base model thinking
+    api_key=$(_config_get glm.api_key)
+    api_base=$(_config_get glm.api_base)
+    model=$(_config_get glm.model)
+    thinking=$(_config_get glm.thinking)
+
+    echo -n "glm.api_key: "
+    if [[ -z "$api_key" ]]; then
+        echo -e "${RED}✗ 未配置${NC}"
+        echo -e "${DIM}  sparring config init  或  export SPARRING_GLM_API_KEY=<id.secret>${NC}"
+        return 1
+    fi
+    local key_masked="${api_key:0:4}***${api_key: -4}"
+    echo -e "${GREEN}✓ ${key_masked}${NC}"
+    echo -e "  API base: ${api_base}"
+    echo -e "  模型: ${model}"
+    echo -e "  thinking: ${thinking}"
+
+    echo -n "  连通性: "
+    local response_file http_status payload
+    response_file=$(mktemp "${TMPDIR:-/tmp}/workflow-verify-glm.XXXXXX")
+    payload=$(jq -n --arg m "$model" --arg t "$thinking" \
+        '{model:$m,messages:[{role:"user",content:"Reply with only: OK"}],thinking:{type:$t},max_tokens:64,temperature:0.1}')
+
+    http_status=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd 30 \
+        curl -sS -w '%{http_code}' -o "$response_file" \
+            --connect-timeout 10 --max-time 25 \
+            -X POST "${api_base}/chat/completions" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${api_key}" \
+            -d "$payload" 2>/dev/null) || http_status="000"
+
+    if [[ "$http_status" == "200" ]]; then
+        local glm_result
+        glm_result=$(jq -r '.choices[0].message.content // ""' "$response_file" 2>/dev/null)
+        if echo "$glm_result" | grep -qi "OK"; then
+            echo -e "${GREEN}✓ 正常${NC}"
+        else
+            echo -e "${YELLOW}? 有响应但内容异常: ${glm_result:0:80}${NC}"
+        fi
+        rm -f "$response_file"
+        return 0
+    fi
+
+    local body
+    body=$(cat "$response_file" 2>/dev/null | head -c 200)
+    rm -f "$response_file"
+    echo -e "${RED}✗ 连接失败 (HTTP ${http_status})${NC}"
+    [[ -n "$body" ]] && echo -e "${DIM}  响应: ${body}${NC}"
+    return 1
+}
+
+_verify_backend() {
+    local role="$1"
+    local backend="$2"
+    local label
+    label=$(reviewer_label_for_backend "$backend")
+    echo ""
+    echo -e "${BLUE}── ${role}: ${label} (${backend}) ──${NC}"
+    case "$backend" in
+        cursor) _verify_cursor; return $? ;;
+        codex)  _verify_codex; return $? ;;
+        glm)    _verify_glm; return $? ;;
+    esac
+}
+
+verify() {
+    echo -e "${BLUE}=== 环境验证 ===${NC}"
+    echo ""
+
+    local ok=true
+    local primary fallback
+    primary=$(get_review_backend) || return 1
+    fallback=$(get_review_backend_fallback) || return 1
+
+    echo -n "jq: "
+    if command -v jq &>/dev/null; then
+        echo -e "${GREEN}✓ $(jq --version)${NC}"
+    else
+        echo -e "${RED}✗ 未安装${NC}"
+        ok=false
+    fi
+
+    echo -n "超时: "
+    echo -e "${GREEN}$(_agent_timeout)s${NC}  重试次数: $(_config_get review.retries) (共 $(_agent_attempts) 次尝试)"
+
+    _verify_backend "主 backend" "$primary" || ok=false
+
+    if [[ -n "$fallback" ]]; then
+        if [[ "$fallback" == "$primary" ]]; then
+            echo ""
+            echo -e "${YELLOW}⚠ 备 backend 与主相同 (${primary})，跳过${NC}"
+        else
+            _verify_backend "备 backend" "$fallback" || echo -e "${DIM}  (备 backend 失败不阻塞主流程)${NC}"
+        fi
+    else
+        echo ""
+        echo -e "${DIM}备 backend: 未配置（设置 WORKFLOW_REVIEW_BACKEND_FALLBACK 启用降级）${NC}"
+    fi
+
+    echo ""
+    echo -n "项目根目录: "
+    echo -e "${GREEN}${PROJECT_ROOT}${NC}"
+
+    echo -n ".workflow 目录: "
+    if [[ -d "${WORKFLOW_DIR}" ]]; then
+        echo -e "${GREEN}✓ 已初始化${NC}"
+    else
+        echo -e "${YELLOW}未初始化 (运行 sparring init)${NC}"
+    fi
+
+    echo ""
+    if $ok; then
+        echo -e "${GREEN}✓ 环境就绪${NC}"
+    else
+        echo -e "${RED}✗ 存在问题，请修复后重试${NC}"
+    fi
+}
+
+# ─── 主函数 ──────────────────────────────────────────────────
+
+main() {
+    check_deps
+
+    # 提取 --project <url> 参数
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project)
+                shift
+                if [[ $# -eq 0 ]]; then
+                    echo -e "${RED}错误: --project 需要一个 URL 参数${NC}" >&2
+                    exit 1
+                fi
+                set_project "$1" || exit 1
+                shift
+                ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    set -- "${args[@]}"
+
+    local command="${1:-help}"
+    shift 2>/dev/null || true
+
+    case "$command" in
+        setup)               exec bash "$(_resolve_script_dir)/bin/setup" "$@" ;;
+        init)                init_workflow ;;
+        create)              create_task "$@" ;;
+        propose)             propose "$@" ;;
+        review-proposal)     review_proposal "$@" ;;
+        review-proposal-bg)  review_proposal_bg "$@" ;;
+        auto-review-proposal) auto_review_proposal "$@" ;;
+        approve-proposal)    approve_proposal "$@" ;;
+        implement)           implement "$@" ;;
+        review-code)         review_code "$@" ;;
+        review-code-bg)      review_code_bg "$@" ;;
+        auto-review-code)    auto_review_code "$@" ;;
+        approve)             approve_final "$@" ;;
+        review-status)       show_review_status "$@" ;;
+        review-result)       show_review_result "$@" ;;
+        review-cancel)       cancel_review_job "$@" ;;
+        __review-worker)     run_review_worker "$@" ;;
+        list)                list_tasks ;;
+        status)              show_status "$@" ;;
+        verify)              verify ;;
+        config)              config_cmd "$@" ;;
+        issue-poll)          issue_poll "$@" ;;
+        issue-claim)         issue_claim "$@" ;;
+        issue-comment)       issue_comment "$@" ;;
+        issue-read)          issue_read "$@" ;;
+        issue-wait-reply)    issue_wait_reply "$@" ;;
+        issue-done)          issue_done "$@" ;;
+        issue-status)        update_project_status "$@" ;;
+        help|--help|-h)
+            cat <<EOF
+${BLUE}Sparring${NC} — AI 左右脑互搏
+
+${YELLOW}用法:${NC} sparring <command> [options]
+${DIM}(兼容别名: workflow，历史脚本仍可用)${NC}
+
+${YELLOW}初始化:${NC}
+  ${GREEN}setup${NC}                         交互式初始化 (选择模型、配置 Issue 模式)
+  ${GREEN}verify${NC}                        验证环境 (依赖、review backend 连通性)
+
+${YELLOW}任务管理:${NC}
+  ${GREEN}init${NC}                          初始化工作流目录
+  ${GREEN}create${NC} <name> <claude|cursor>  创建新任务
+  ${GREEN}list${NC}                          列出所有任务
+  ${GREEN}status${NC} <task-id>              查看任务状态
+
+${YELLOW}方案阶段:${NC}
+  ${GREEN}propose${NC} <task-id>             执行者编写方案
+  ${GREEN}review-proposal${NC} <task-id>     自动调用 reviewer backend review 方案
+  ${GREEN}review-proposal-bg${NC} <task-id>  后台运行方案 review（返回 job-id）
+  ${GREEN}auto-review-proposal${NC} <task-id> 自动 review 循环 (Skill 模式下最多 ${MAX_REVIEW_ROUNDS} 轮，CLI 下单轮)
+  ${GREEN}approve-proposal${NC} <task-id>    批准方案
+
+${YELLOW}实现阶段:${NC}
+  ${GREEN}implement${NC} <task-id>           执行者实现代码
+  ${GREEN}review-code${NC} <task-id>         自动调用 reviewer backend review 代码
+  ${GREEN}review-code-bg${NC} <task-id>      后台运行代码 review（返回 job-id）
+  ${GREEN}auto-review-code${NC} <task-id>    自动 review 循环 (Skill 模式下最多 ${MAX_REVIEW_ROUNDS} 轮，CLI 下单轮)
+  ${GREEN}approve${NC} <task-id>             最终批准
+
+${YELLOW}后台 Review 作业:${NC}
+  ${GREEN}review-status${NC} [job-id|task-id] 查看后台 review 作业状态
+  ${GREEN}review-result${NC} <job-id>        查看后台 review 的最终结果
+  ${GREEN}review-cancel${NC} <job-id>        取消后台 review 作业
+
+${YELLOW}GitHub Issue 集成:${NC}
+  ${GREEN}issue-poll${NC}                    扫描带 ${ISSUE_LABEL} 标签的可认领 issue
+  ${GREEN}issue-claim${NC} <number>          认领 issue (更新看板状态 + 发布 comment)
+  ${GREEN}issue-comment${NC} <number> <body> 在 issue 上发布 comment (支持 @file.md)
+  ${GREEN}issue-read${NC} <number> [count]   读取 issue 最近的 comments (默认 5 条)
+  ${GREEN}issue-wait-reply${NC} <number>     轮询等待 issue 新回复 (每 ${ISSUE_POLL_INTERVAL}s，最多 10min)
+  ${GREEN}issue-done${NC} <number> [pr_url]  标记完成 (状态 → Reviewing + 发布 comment)
+  ${GREEN}issue-status${NC} <number> <status> 更新 issue 看板状态
+
+${YELLOW}配置:${NC}
+  ${GREEN}config init${NC}                 生成 ~/.config/sparring/config.json
+  ${GREEN}config init project${NC}         生成 .sparring/config.json（项目级，团队共享）
+  ${GREEN}config show${NC}                 显示合并后的生效配置（key 打掩码）
+  ${GREEN}config path${NC}                 打印 global / project 配置文件路径
+  ${GREEN}config get <key.path>${NC}       取单个值，如 config get glm.api_key
+
+${YELLOW}全局选项:${NC}
+  ${GREEN}--project${NC} <url>               指定 GitHub Project 看板 URL
+
+${YELLOW}配置文件（优先级从低到高）:${NC}
+  内置默认 → global (${CONFIG_FILE_GLOBAL})
+          → project (.sparring/config.json)
+          → env 变量 (SPARRING_*, WORKFLOW_* 兼容)
+
+${YELLOW}环境变量（可覆盖 config.json 任意字段）:${NC}
+  主推 SPARRING_* 前缀，SPARRING_<KEY_PATH> 对应 config 的 key.path（全大写、点转下划线）
+  兼容 WORKFLOW_* 前缀（历史变量）
+
+  ${DIM}示例:${NC}
+    SPARRING_REVIEW_BACKEND=glm     对应 review.backend
+    SPARRING_GLM_API_KEY=xxx.yyy    对应 glm.api_key
+    SPARRING_REVIEW_FALLBACK=glm    对应 review.fallback
+    SPARRING_REVIEW_TIMEOUT=120     对应 review.timeout
+
+  ${DIM}历史兼容（仍生效）:${NC}
+    WORKFLOW_REVIEW_BACKEND_FALLBACK → review.fallback
+    WORKFLOW_AGENT_MODEL             → cursor.model
+    以及所有 WORKFLOW_* 形式的新 schema 变量
+
+${YELLOW}Issue 相关环境变量:${NC}
+  WORKFLOW_POLL_INTERVAL  issue 轮询间隔秒数 (默认: ${ISSUE_POLL_INTERVAL})
+  WORKFLOW_ISSUE_LABEL    issue 筛选标签 (默认: ${ISSUE_LABEL})
+  WORKFLOW_PROJECT_NUMBER project 编号 (环境变量或 --project)
+  WORKFLOW_PROJECT_OWNER  project 所属组织 (环境变量或 --project)
+
+${YELLOW}示例:${NC}
+  sparring setup                             # 交互式初始化
+  sparring verify                           # 检查环境
+  sparring create "refactor-auth" claude     # 创建任务
+  sparring review-proposal <task-id>        # 自动 review
+  sparring --project https://github.com/orgs/kanyun-inc/projects/3 issue-poll
+  sparring issue-claim 106                  # 认领 issue #106
+  sparring issue-comment 106 "方案 LGTM"   # 发布 comment
+
+EOF
+            ;;
+        *)
+            echo -e "${RED}未知命令: $command${NC}"
+            echo "运行 'sparring help' 查看帮助"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

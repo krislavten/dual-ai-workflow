@@ -3,9 +3,9 @@ description: Set up Sparring - install dependencies, configure Cursor Agent mode
 argument-hint: (no arguments needed)
 ---
 
-# Dual AI Workflow Setup
+# Sparring Setup
 
-You are helping the user set up the Dual AI Workflow environment. This is an interactive setup — ask questions, install dependencies, and configure everything step by step.
+You are helping the user set up the Sparring environment. This is an interactive setup — ask questions, install dependencies, and configure everything step by step.
 
 **Plugin directory**: Find your own plugin install path by checking where this command file lives. The `bin/` and `agents/` directories are relative to the plugin root.
 
@@ -18,7 +18,7 @@ ls ~/.claude/plugins/marketplaces/*/commands/setup.md 2>/dev/null || ls ~/.claud
 ```
 
 Determine the plugin root directory. All paths below are relative to it:
-- `bin/workflow` — the CLI tool
+- `bin/sparring` — the CLI tool (with `bin/workflow` as a compat symlink)
 - `bin/setup` — the legacy bash setup script (not used here)
 - `agents/cursor.md` — Cursor Agent configuration
 
@@ -75,23 +75,24 @@ After installation, verify: `command -v agent`
 
 If curl install fails, tell the user to install manually from https://cursor.com/install and re-run `/sparring:setup`.
 
-## Step 3: Install workflow CLI
+## Step 3: Install sparring CLI
 
-Create symlink so `workflow` command is available globally:
+Create two symlinks so both `sparring` (main) and `workflow` (compat alias) are available globally:
 
 ```bash
 # Check if already installed
-command -v workflow
+command -v sparring
 ```
 
 If not:
 ```bash
 # Prefer ~/.local/bin
 mkdir -p ~/.local/bin
-ln -sf "<plugin-root>/bin/workflow" ~/.local/bin/workflow
+ln -sf "<plugin-root>/bin/sparring" ~/.local/bin/sparring
+ln -sf "<plugin-root>/bin/sparring" ~/.local/bin/workflow
 ```
 
-Verify: `command -v workflow`
+Verify: `command -v sparring && command -v workflow`
 
 ## Step 4: Select Cursor Agent Model
 
@@ -213,14 +214,15 @@ APPROVE 和 CONCERNS 二选一，不要混用。
 
 ## Step 6: Permissions (Optional)
 
-Ask the user: "workflow 需要频繁调用 bash 命令（workflow CLI、agent CLI、gh CLI）。是否允许自动执行这些命令，不用每次确认？"
+Ask the user: "sparring 需要频繁调用 bash 命令（sparring CLI、agent CLI、gh CLI）。是否允许自动执行这些命令，不用每次确认？"
 
 If yes, tell the user to run:
 ```
 /permissions
 ```
 And add these allow rules (or guide them through it):
-- `Bash(workflow *)` — workflow CLI commands
+- `Bash(sparring *)` — sparring CLI commands
+- `Bash(workflow *)` — compat alias for legacy scripts
 - `Bash(agent *)` — Cursor Agent calls
 - `Bash(gh *)` — GitHub CLI calls
 - `Bash(HTTP_PROXY= *)` — agent calls with proxy unset
@@ -233,7 +235,7 @@ If no, tell them: "没问题，每次执行命令时会弹出确认。"
 
 Run verification:
 ```bash
-workflow verify
+sparring verify
 ```
 
 ## Step 8: Done
@@ -245,8 +247,8 @@ Setup 完成！
 
 开始使用：
   /sparring:workflow <任务描述>   — 普通模式
-  /sparring:yolo <任务描述>      — 全自动模式
-  /sparring:issue <看板URL>      — Issue 驱动模式
+  /sparring:yolo <任务描述>       — 全自动模式
+  /sparring:issue <看板URL>       — Issue 驱动模式
 
-更多帮助: workflow help
+更多帮助: sparring help
 ```

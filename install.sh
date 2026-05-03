@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# 安装脚本
+# Sparring 安装脚本
+# 装两个命令：sparring (主) 和 workflow (兼容别名)
 
 set -e
 
@@ -10,23 +11,17 @@ NC='\033[0m'
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-echo -e "${YELLOW}安装 Dual AI Workflow...${NC}"
+echo -e "${YELLOW}安装 Sparring...${NC}"
 echo ""
 
-# 检查是否已经在 PATH 中
-if command -v workflow &> /dev/null; then
-    echo -e "${GREEN}✓ workflow 命令已在 PATH 中${NC}"
-    workflow help
-    exit 0
-fi
-
-# 创建软链接
+# 选择目标目录
+target_dir=""
+sudo_cmd=""
 if [[ -d "$HOME/.local/bin" ]]; then
-    ln -sf "${SCRIPT_DIR}/bin/workflow" "$HOME/.local/bin/workflow"
-    echo -e "${GREEN}✓ 已创建软链接到 ~/.local/bin/workflow${NC}"
+    target_dir="$HOME/.local/bin"
 elif [[ -d "/usr/local/bin" ]]; then
-    sudo ln -sf "${SCRIPT_DIR}/bin/workflow" "/usr/local/bin/workflow"
-    echo -e "${GREEN}✓ 已创建软链接到 /usr/local/bin/workflow${NC}"
+    target_dir="/usr/local/bin"
+    sudo_cmd="sudo"
 else
     echo -e "${YELLOW}警告: 未找到合适的 bin 目录${NC}"
     echo "请手动添加到 PATH:"
@@ -34,22 +29,29 @@ else
     exit 1
 fi
 
-# 安装 skill
+# 创建软链接 — sparring 主命令 + workflow 兼容别名
+$sudo_cmd ln -sf "${SCRIPT_DIR}/bin/sparring" "${target_dir}/sparring"
+$sudo_cmd ln -sf "${SCRIPT_DIR}/bin/sparring" "${target_dir}/workflow"
+echo -e "${GREEN}✓ 已安装到 ${target_dir}/${NC}"
+echo -e "${GREEN}  主命令: sparring${NC}"
+echo -e "${GREEN}  兼容别名: workflow (原命令名，仍可用)${NC}"
+
+# 安装 Claude Code skill
 SKILLS_DIR="$HOME/.claude/skills"
 mkdir -p "${SKILLS_DIR}"
-ln -sf "${SCRIPT_DIR}/.skills/workflow" "${SKILLS_DIR}/dual-ai-workflow"
-echo -e "${GREEN}✓ 已安装 /workflow skill 到 ~/.claude/skills/${NC}"
+ln -sf "${SCRIPT_DIR}/.skills/workflow" "${SKILLS_DIR}/sparring"
+echo -e "${GREEN}✓ 已安装 sparring skill 到 ~/.claude/skills/${NC}"
 
-# 验证安装
-if command -v workflow &> /dev/null; then
+# 验证
+if command -v sparring &> /dev/null; then
     echo ""
-    echo -e "${GREEN}✓ 安装成功！${NC}"
+    echo -e "${GREEN}✓ 安装成功${NC}"
     echo ""
     echo -e "${YELLOW}使用方法:${NC}"
-    echo "  1. 命令行工具: workflow <command>"
-    echo "  2. Claude Code Skill: /workflow <task-description> <executor>"
+    echo "  1. 命令行: sparring <command>  (或 workflow <command>)"
+    echo "  2. Claude Code Skill: /sparring <task-description>"
     echo ""
-    workflow help
+    sparring help
 else
     echo -e "${YELLOW}安装可能失败，请检查 PATH 配置${NC}"
 fi

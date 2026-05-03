@@ -1,6 +1,6 @@
 ---
 description: Dual AI YOLO workflow - Fully automated task execution with peer review, minimal user intervention
-trigger: When user says "/workflow-yolo"
+trigger: When user says "/sparring:yolo"
 mode: command
 targetAgents:
   - claude-code
@@ -13,7 +13,7 @@ Fully automated execution. You handle everything, user only confirms final commi
 ## Flow
 
 ```
-User: /workflow-yolo <task> <executor>
+User: /sparring:yolo <task> <executor>
   ↓
 Executor: Draft proposal independently
   ↓
@@ -34,7 +34,7 @@ Commit!
 
 ### If YOU are the Executor
 
-1. **Create task**: `workflow create "<name>" <executor>`
+1. **Create task**: `sparring create "<name>" <executor>`
 
 2. **Draft proposal independently**
    - Don't ask user for input
@@ -46,7 +46,7 @@ Commit!
    Use the CLI tool or call agent directly:
    ```bash
    # Option A: Use CLI
-   workflow review-proposal <task-id>
+   sparring review-proposal <task-id>
 
    # Option B: Call agent directly
    response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "Review this proposal: ...")
@@ -65,7 +65,7 @@ Commit!
 5. **Auto-code review loop**
    ```bash
    # Option A: Use CLI
-   workflow review-code <task-id>
+   sparring review-code <task-id>
 
    # Option B: Call agent directly
    response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "Review this code: $(git diff)")
@@ -143,7 +143,7 @@ Re-review 时说明每条处置（fixed / deferred / rejected + 理由），让 
 ## Example
 
 ```bash
-User: /workflow-yolo 修复用户头像上传失败的bug cursor
+User: /sparring:yolo 修复用户头像上传失败的bug cursor
 
 # Cursor works autonomously:
 # 1. Reproduces bug
@@ -172,10 +172,10 @@ Cursor: [commits] Done! 🎉
 
 When a task has `issue_number` in `meta.json`, sync key steps to the Issue:
 
-- **Cursor Agent reviews** are auto-synced by the `workflow` CLI with `🤖` marker
+- **Cursor Agent reviews** are auto-synced by the `sparring` CLI with `🤖` marker
 - **You (Claude/Executor)** must manually sync your actions:
   ```bash
-  workflow issue-comment <number> "🧠 **[Claude Code — <Phase>]**
+  sparring issue-comment <number> "🧠 **[Claude Code — <Phase>]**
 
   <content>"
   ```

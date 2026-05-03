@@ -10,7 +10,7 @@ Fully automated execution. You handle everything, user only confirms final commi
 ## Flow
 
 ```
-User: /workflow-yolo <task> <executor>
+User: /sparring:yolo <task> <executor>
   ↓
 Executor: Draft proposal independently
   ↓
@@ -28,26 +28,26 @@ User: yes → Commit!
 ## Cross-Review Principle
 
 Same as normal mode: **every conclusion, recommendation, and decision must be reviewed by Cursor Agent before presenting to the user.** In YOLO mode this includes:
-- The proposal itself (via `workflow review-proposal`)
+- The proposal itself (via `sparring review-proposal`)
 - Any key technical decisions made during implementation
-- The final code (via `workflow review-code`)
+- The final code (via `sparring review-code`)
 
 ## Instructions
 
 ### If YOU are the Executor (default: claude)
 
-1. **Create task**: `workflow create "<name>"` (defaults to claude)
+1. **Create task**: `sparring create "<name>"` (defaults to claude)
 
 2. **Draft proposal independently**
    - Don't ask user for input — use your best judgment
    - Save to `.workflow/plans/<task-id>/proposal.md`
 
-3. **MUST call reviewer**: `workflow review-proposal <task-id>`
+3. **MUST call reviewer**: `sparring review-proposal <task-id>`
    - If CONCERNS, address and retry. Up to 5 rounds.
 
 4. **Implement code** — follow approved proposal, write tests
 
-5. **MUST call reviewer**: `workflow review-code <task-id>`
+5. **MUST call reviewer**: `sparring review-code <task-id>`
    - If CONCERNS, fix and retry. Up to 5 rounds.
 
 6. **Present final result** — summary, changes, review iterations, ask to commit
@@ -66,7 +66,7 @@ When a task has `issue_number` in `meta.json`, sync key steps to the Issue:
 - **Cursor Agent reviews** are auto-synced by the `workflow` CLI with `🤖` marker
 - **You (Claude/Executor)** must manually sync your actions:
   ```bash
-  workflow issue-comment <number> "🧠 **[Claude Code — <Phase>]**
+  sparring issue-comment <number> "🧠 **[Claude Code — <Phase>]**
 
   <content>"
   ```

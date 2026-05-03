@@ -7,8 +7,8 @@
     {
       "name": "sparring",
       "source": "./",
-      "description": "Dual AI peer review — Claude Code writes, Cursor Agent challenges",
-      "version": "2.0.0"
+      "description": "AI peer review — Claude writes, Cursor/Codex/GLM challenges",
+      "version": "2.1.0"
     }
   ]
 }

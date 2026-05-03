@@ -1,6 +1,6 @@
 ---
 description: GitHub Issue-driven dual AI workflow - Poll issues, discuss via comments, implement with peer review
-trigger: When user says "/workflow-issue"
+trigger: When user says "/sparring:issue"
 mode: command
 targetAgents:
   - claude-code
@@ -28,9 +28,9 @@ PR created → status: Reviewing
 ## Trigger
 
 ```
-/workflow-issue                     # Poll for claude-ok issues and process next one
-/workflow-issue <issue-number>      # Process a specific issue
-/workflow-issue poll                # One-time poll, show available issues
+/sparring:issue                     # Poll for claude-ok issues and process next one
+/sparring:issue <issue-number>      # Process a specific issue
+/sparring:issue poll                # One-time poll, show available issues
 ```
 
 ## Phase 0: Issue Discovery & Claiming
@@ -164,7 +164,7 @@ PR created → status: Reviewing
 Save proposal to .workflow/plans/<task-id>/proposal.md
 for round in 1..5:
   response = call Cursor Agent to review proposal
-    (via: workflow review-proposal <task-id>)
+    (via: sparring review-proposal <task-id>)
   save to .workflow/plans/<task-id>/proposal-review-{round}.md
   if APPROVE:
     post to issue: "✅ 方案经 Cursor Agent review 通过 ({round} 轮)"
@@ -199,7 +199,7 @@ if 5 rounds without approval:
 for round in 1..5:
   git diff > .workflow/plans/<task-id>/changes.diff
   response = call Cursor Agent to review code
-    (via: workflow review-code <task-id>)
+    (via: sparring review-code <task-id>)
   save to .workflow/plans/<task-id>/code-review-{round}.md
   if APPROVE:
     break
@@ -288,18 +288,18 @@ Since all comments are posted via `gh` under the same GitHub account, **prefix e
 
 - `🧠 **[Claude Code — Proposal]**` — Claude's proposal or direction discussion
 - `🧠 **[Claude Code — Implementation]**` — Claude's implementation summary
-- `🤖 **[Cursor Agent — Proposal Review #N]**` — Cursor's proposal review (auto-synced by `workflow` CLI)
-- `🤖 **[Cursor Agent — Code Review #N]**` — Cursor's code review (auto-synced by `workflow` CLI)
+- `🤖 **[Cursor Agent — Proposal Review #N]**` — Cursor's proposal review (auto-synced by `sparring` CLI)
+- `🤖 **[Cursor Agent — Code Review #N]**` — Cursor's code review (auto-synced by `sparring` CLI)
 - `🔧 **[Workflow — Status]**` — automated status transitions
 
 **Claude must always use the `🧠` prefix** when posting comments:
 ```bash
-workflow issue-comment <number> "🧠 **[Claude Code — Proposal]**
+sparring issue-comment <number> "🧠 **[Claude Code — Proposal]**
 
 <proposal content>"
 ```
 
-**Cursor Agent reviews** are auto-synced by `workflow review-proposal` / `workflow review-code` with the `🤖` prefix — no manual action needed.
+**Cursor Agent reviews** are auto-synced by `sparring review-proposal` / `sparring review-code` with the `🤖` prefix — no manual action needed.
 
 ### Waiting for User Reply
 When you need user input (Normal mode), use this pattern:
@@ -340,7 +340,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ## Example: Normal Mode
 
 ```
-/workflow-issue 106
+/sparring:issue 106
 
 # Step 0: Claim
 Claude: "🤖 认领 #106，开始分析..."
@@ -390,7 +390,7 @@ Claude (issue comment):
 ## Example: YOLO Mode
 
 ```
-/workflow-issue 118
+/sparring:issue 118
 
 [issue #118 has 'yolo' label]
 

@@ -19,8 +19,8 @@ If the user provides an issue URL like `https://github.com/<owner>/<repo>/issues
 
 Pass the project URL to workflow commands via `--project`:
 ```bash
-workflow --project "<project-url>" issue-claim <number>
-workflow --project "<project-url>" issue-done <number> <pr-url>
+sparring --project "<project-url>" issue-claim <number>
+sparring --project "<project-url>" issue-done <number> <pr-url>
 ```
 
 If no project URL is provided, issue commands still work but **project board status will not be updated** (claiming, review transitions, etc. are skipped). Always ask the user for the project URL if they haven't provided one.
@@ -41,9 +41,9 @@ PR created → status: Reviewing
 ## Trigger
 
 ```
-/workflow-issue                     # Poll for claude-ok issues and process next one
-/workflow-issue <issue-number>      # Process a specific issue
-/workflow-issue poll                # One-time poll, show available issues
+/sparring:issue                     # Poll for claude-ok issues and process next one
+/sparring:issue <issue-number>      # Process a specific issue
+/sparring:issue poll                # One-time poll, show available issues
 ```
 
 ## Phase 0: Issue Discovery & Claiming
@@ -92,7 +92,7 @@ gh issue view <number> --repo <repo> --json body,title,comments
 
 ```
 for round in 1..5:
-  call: workflow review-proposal <task-id>
+  call: sparring review-proposal <task-id>
   if APPROVE: break
   else: address concerns, update proposal
 if 5 rounds without approval: escalate to user
@@ -110,7 +110,7 @@ if 5 rounds without approval: escalate to user
 
 ```
 for round in 1..5:
-  call: workflow review-code <task-id>
+  call: sparring review-code <task-id>
   if APPROVE: break
   else: fix issues
 if 5 rounds without approval: escalate to user
@@ -142,7 +142,7 @@ Since all comments are posted via `gh` under the same GitHub account, **prefix e
 
 **Claude must always use the `🧠` prefix** when posting comments:
 ```bash
-workflow issue-comment <number> "🧠 **[Claude Code — Proposal]**
+sparring issue-comment <number> "🧠 **[Claude Code — Proposal]**
 
 <proposal content>"
 ```

@@ -1,6 +1,6 @@
 ---
 description: Dual AI collaborative workflow - Execute tasks with automatic peer review between Claude and Cursor Agent
-trigger: When user says "/workflow" or "/workflow-yolo"
+trigger: When user says "/sparring:workflow" or "/sparring:yolo"
 mode: command
 targetAgents:
   - claude-code
@@ -12,7 +12,7 @@ You are the **Workflow Orchestrator** managing collaboration between two AI agen
 
 ## Modes
 
-### 👥 Normal Mode (default): `/workflow <task> <executor>`
+### 👥 Normal Mode (default): `/sparring:workflow <task> <executor>`
 User participates at key decision points:
 1. User + Executor discuss and draft proposal together
 2. Executor ↔ Reviewer auto-iterate on proposal (no user)
@@ -21,7 +21,7 @@ User participates at key decision points:
 5. **User confirms implementation** ✓
 6. Commit
 
-### 🚀 YOLO Mode: `/workflow-yolo <task> <executor>`
+### 🚀 YOLO Mode: `/sparring:yolo <task> <executor>`
 Fully automated, user only confirms final commit:
 1. Executor drafts proposal alone
 2. Executor ↔ Reviewer auto-iterate (no user)
@@ -32,12 +32,12 @@ Fully automated, user only confirms final commit:
 
 ### Step 1: User + Executor Co-design
 
-When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
+When the user invokes `/sparring:workflow <task-description> <executor:claude|cursor>`:
 
 1. **Initialize Task**
    ```bash
-   workflow init  # if not exists
-   task_id=$(workflow create "<task-name>" <executor>)
+   sparring init  # if not exists
+   task_id=$(sparring create "<task-name>" <executor>)
    ```
 
 2. **Engage User in Discussion**
@@ -82,7 +82,7 @@ When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
 4. **Executor ↔ Reviewer Iteration**
    ```
    while not approved and rounds < 5:
-     reviewer: call `workflow review-proposal <task-id>`
+     reviewer: call `sparring review-proposal <task-id>`
        (internally runs: agent --print --trust --model $WORKFLOW_AGENT_MODEL)
      parse reviewer response
      if APPROVE:
@@ -121,7 +121,7 @@ When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
    ```
    executor: implement code per proposal
    while not approved and rounds < 5:
-     reviewer: call `workflow review-code <task-id>`
+     reviewer: call `sparring review-code <task-id>`
        (internally runs: agent --print --trust --model $WORKFLOW_AGENT_MODEL)
      if APPROVE:
        break
@@ -150,7 +150,7 @@ When the user invokes `/workflow <task-description> <executor:claude|cursor>`:
 
 ## Phase 2: YOLO Mode Flow
 
-When user invokes `/workflow-yolo <task> <executor>`:
+When user invokes `/sparring:yolo <task> <executor>`:
 
 1. **Skip User Discussion** - Executor drafts proposal independently
 2. **Auto-review loop** - Executor ↔ Reviewer iterate
@@ -162,7 +162,7 @@ All intermediate steps automated, only final commit requires user.
 ## Key Instructions
 
 ### Mode Detection
-- Check if user said `/workflow-yolo` or passed `--yolo` flag
+- Check if user said `/sparring:yolo` or passed `--yolo` flag
 - Set `MODE=yolo` or `MODE=normal` accordingly
 - Adjust user checkpoints based on mode
 
@@ -186,7 +186,7 @@ All intermediate steps automated, only final commit requires user.
 5. **Present final result** to user for commit
 
 ### When YOU are Reviewer (for Cursor's work)
-- **Use the `workflow` CLI** or call agent directly
+- **Use the `sparring` CLI** or call agent directly
 - **Parse the response** and extract concerns/approvals
 - **Don't proceed** until concerns are addressed
 
@@ -194,8 +194,8 @@ All intermediate steps automated, only final commit requires user.
 
 **Option 1: Use the CLI (recommended):**
 ```bash
-workflow review-proposal <task-id>    # auto-calls agent
-workflow review-code <task-id>        # auto-calls agent
+sparring review-proposal <task-id>    # auto-calls agent
+sparring review-code <task-id>        # auto-calls agent
 ```
 
 **Option 2: Call agent directly:**
@@ -224,10 +224,10 @@ response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-
 
 When a task has an associated `issue_number` in `meta.json`, **sync key actions to the Issue as comments with identity markers**:
 
-- The `workflow` CLI auto-syncs review results (Cursor Agent reviews)
+- The `sparring` CLI auto-syncs review results (Cursor Agent reviews)
 - **You (Claude) must manually sync your own actions** using:
   ```bash
-  workflow issue-comment <number> "🧠 **[Claude Code — <Phase>]**
+  sparring issue-comment <number> "🧠 **[Claude Code — <Phase>]**
 
   <your content here>"
   ```
@@ -257,7 +257,7 @@ When a task has an associated `issue_number` in `meta.json`, **sync key actions 
 ## Example: Normal Mode
 
 ```
-User: /workflow 重构用户认证系统 claude
+User: /sparring:workflow 重构用户认证系统 claude
 
 Claude: "Let me understand the requirements:
 1. What's wrong with current auth?
@@ -309,7 +309,7 @@ Claude: [creates commit]
 ## Example: YOLO Mode
 
 ```
-User: /workflow-yolo 修复登录重定向bug cursor
+User: /sparring:yolo 修复登录重定向bug cursor
 
 [Cursor Agent automatically:]
 1. Analyzes the bug
