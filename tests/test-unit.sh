@@ -65,10 +65,34 @@ source_workflow_funcs() {
     export AGENTS_DIR="$PROJECT_DIR/agents"
     mkdir -p "$PROJECT_ROOT" "$WORKFLOW_DIR" "$PLANS_DIR"
 
+    # 隔离：指向不存在的 config 文件，避免读取用户真实 ~/.config/sparring/config.json
+    export CONFIG_DIR_GLOBAL="$TMP_DIR/config-global"
+    export CONFIG_FILE_GLOBAL="$CONFIG_DIR_GLOBAL/config.json"
+    export CONFIG_DIR_PROJECT="$TMP_DIR/project/.sparring"
+    export CONFIG_FILE_PROJECT="$CONFIG_DIR_PROJECT/config.json"
+
+    # 清掉所有可能影响测试的 env 变量
+    unset WORKFLOW_REVIEW_BACKEND WORKFLOW_REVIEW_BACKEND_FALLBACK
+    unset WORKFLOW_REVIEW_TIMEOUT WORKFLOW_REVIEW_RETRIES
+    unset WORKFLOW_AGENT_MODEL WORKFLOW_CODEX_MODEL WORKFLOW_CODEX_EFFORT WORKFLOW_CODEX_HOME
+    unset WORKFLOW_GLM_API_KEY WORKFLOW_GLM_MODEL WORKFLOW_GLM_THINKING
+    unset WORKFLOW_GLM_MAX_TOKENS WORKFLOW_GLM_TEMPERATURE WORKFLOW_GLM_API_BASE
+    unset SPARRING_REVIEW_BACKEND SPARRING_REVIEW_FALLBACK SPARRING_REVIEW_TIMEOUT SPARRING_REVIEW_RETRIES
+    unset SPARRING_GLM_API_KEY SPARRING_GLM_MODEL SPARRING_CURSOR_MODEL
+
     # Source the workflow script but replace main() and set -euo to prevent issues
     eval "$(sed -e 's/^main "$@"/# main disabled for testing/' \
                  -e 's/^set -euo pipefail/# set disabled for testing/' \
                  "$WORKFLOW")"
+
+    # source 过程会执行 CONFIG_FILE_* 赋值，覆盖我们上面的 export。再次强制设置
+    CONFIG_DIR_GLOBAL="$TMP_DIR/config-global"
+    CONFIG_FILE_GLOBAL="$CONFIG_DIR_GLOBAL/config.json"
+    CONFIG_DIR_PROJECT="$TMP_DIR/project/.sparring"
+    CONFIG_FILE_PROJECT="$CONFIG_DIR_PROJECT/config.json"
+
+    # 清掉可能残留的 warn 哨兵文件（避免测试间互相干扰）
+    rm -f "${TMPDIR:-/tmp}/workflow-cfg-warn-$$-"* 2>/dev/null || true
 }
 
 # ─── Tests ───────────────────────────────────────────────────
@@ -507,9 +531,8 @@ echo "=== _agent_attempts ==="
 
 test_agent_attempts_default() {
     source_workflow_funcs
-    unset AGENT_RETRIES
     local attempts
-    attempts=$(AGENT_RETRIES=1 _agent_attempts)
+    attempts=$(SPARRING_REVIEW_RETRIES=1 _agent_attempts)
     assert_eq "RETRIES=1 → 2 次尝试" "2" "$attempts"
 }
 test_agent_attempts_default
@@ -517,7 +540,7 @@ test_agent_attempts_default
 test_agent_attempts_zero_retries() {
     source_workflow_funcs
     local attempts
-    attempts=$(AGENT_RETRIES=0 _agent_attempts)
+    attempts=$(SPARRING_REVIEW_RETRIES=0 _agent_attempts)
     assert_eq "RETRIES=0 → 1 次尝试（不重试）" "1" "$attempts"
 }
 test_agent_attempts_zero_retries
@@ -525,10 +548,259 @@ test_agent_attempts_zero_retries
 test_agent_attempts_multi() {
     source_workflow_funcs
     local attempts
-    attempts=$(AGENT_RETRIES=3 _agent_attempts)
+    attempts=$(SPARRING_REVIEW_RETRIES=3 _agent_attempts)
     assert_eq "RETRIES=3 → 4 次尝试" "4" "$attempts"
 }
 test_agent_attempts_multi
+
+echo ""
+echo "=== _config_get 四层优先级 ==="
+
+test_config_defaults() {
+    source_workflow_funcs
+    # 无 global / project / env → 读默认
+    local backend timeout
+    backend=$(_config_get review.backend)
+    timeout=$(_config_get review.timeout)
+    assert_eq "默认 backend=cursor" "cursor" "$backend"
+    assert_eq "默认 timeout=60" "60" "$timeout"
+}
+test_config_defaults
+
+test_config_global_overrides_default() {
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL"
+    echo '{"review":{"backend":"glm","timeout":45}}' > "$CONFIG_FILE_GLOBAL"
+    local backend timeout
+    backend=$(_config_get review.backend)
+    timeout=$(_config_get review.timeout)
+    assert_eq "global 覆盖默认 backend" "glm" "$backend"
+    assert_eq "global 覆盖默认 timeout" "45" "$timeout"
+    rm -f "$CONFIG_FILE_GLOBAL"
+}
+test_config_global_overrides_default
+
+test_config_project_overrides_global() {
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL" "$CONFIG_DIR_PROJECT"
+    echo '{"review":{"backend":"glm"}}' > "$CONFIG_FILE_GLOBAL"
+    echo '{"review":{"backend":"codex"}}' > "$CONFIG_FILE_PROJECT"
+    local backend
+    backend=$(_config_get review.backend)
+    assert_eq "project 覆盖 global" "codex" "$backend"
+    rm -f "$CONFIG_FILE_GLOBAL" "$CONFIG_FILE_PROJECT"
+}
+test_config_project_overrides_global
+
+test_config_sparring_env_highest() {
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL" "$CONFIG_DIR_PROJECT"
+    echo '{"review":{"backend":"glm"}}' > "$CONFIG_FILE_GLOBAL"
+    echo '{"review":{"backend":"codex"}}' > "$CONFIG_FILE_PROJECT"
+    local backend
+    backend=$(SPARRING_REVIEW_BACKEND=cursor _config_get review.backend)
+    assert_eq "SPARRING_* env 最高优先级" "cursor" "$backend"
+    rm -f "$CONFIG_FILE_GLOBAL" "$CONFIG_FILE_PROJECT"
+}
+test_config_sparring_env_highest
+
+test_config_workflow_env_fallback() {
+    source_workflow_funcs
+    # SPARRING_* 未设，WORKFLOW_* 应该生效
+    local backend
+    backend=$(WORKFLOW_REVIEW_BACKEND=glm _config_get review.backend)
+    assert_eq "WORKFLOW_* 兼容别名" "glm" "$backend"
+}
+test_config_workflow_env_fallback
+
+test_config_sparring_wins_over_workflow() {
+    source_workflow_funcs
+    local backend
+    backend=$(SPARRING_REVIEW_BACKEND=cursor WORKFLOW_REVIEW_BACKEND=glm \
+        _config_get review.backend)
+    assert_eq "SPARRING_* 优先于 WORKFLOW_*" "cursor" "$backend"
+}
+test_config_sparring_wins_over_workflow
+
+test_config_legacy_alias_fallback() {
+    source_workflow_funcs
+    # 历史变量：WORKFLOW_REVIEW_BACKEND_FALLBACK → review.fallback
+    local fb
+    fb=$(WORKFLOW_REVIEW_BACKEND_FALLBACK=codex _config_get review.fallback)
+    assert_eq "WORKFLOW_REVIEW_BACKEND_FALLBACK legacy 别名" "codex" "$fb"
+}
+test_config_legacy_alias_fallback
+
+test_config_legacy_alias_agent_model() {
+    source_workflow_funcs
+    local model
+    model=$(WORKFLOW_AGENT_MODEL=opus-4.7 _config_get cursor.model)
+    assert_eq "WORKFLOW_AGENT_MODEL legacy 别名" "opus-4.7" "$model"
+}
+test_config_legacy_alias_agent_model
+
+test_config_malformed_file() {
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL"
+    echo 'not valid json {' > "$CONFIG_FILE_GLOBAL"
+    local backend
+    backend=$(_config_get review.backend 2>/dev/null)
+    # 格式错的文件被忽略，应该回退到默认
+    assert_eq "非法 JSON 文件回退到默认" "cursor" "$backend"
+    rm -f "$CONFIG_FILE_GLOBAL"
+}
+test_config_malformed_file
+
+test_config_nested_merge() {
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL" "$CONFIG_DIR_PROJECT"
+    # global 设 glm.api_key，project 设 glm.model → 应该合并不是覆盖
+    echo '{"glm":{"api_key":"global-key"}}' > "$CONFIG_FILE_GLOBAL"
+    echo '{"glm":{"model":"glm-4-plus"}}' > "$CONFIG_FILE_PROJECT"
+    local key model
+    key=$(_config_get glm.api_key)
+    model=$(_config_get glm.model)
+    assert_eq "递归合并保留 global.glm.api_key" "global-key" "$key"
+    assert_eq "递归合并加上 project.glm.model" "glm-4-plus" "$model"
+    rm -f "$CONFIG_FILE_GLOBAL" "$CONFIG_FILE_PROJECT"
+}
+test_config_nested_merge
+
+echo ""
+echo "=== config 子命令 ==="
+
+test_config_init_global() {
+    source_workflow_funcs
+    rm -f "$CONFIG_FILE_GLOBAL"
+    config_init >/dev/null 2>&1
+    assert_file_exists "global config 创建" "$CONFIG_FILE_GLOBAL"
+    # 检查 chmod 600
+    local perms
+    perms=$(stat -f %A "$CONFIG_FILE_GLOBAL" 2>/dev/null || stat -c %a "$CONFIG_FILE_GLOBAL" 2>/dev/null)
+    assert_eq "global config chmod 600" "600" "$perms"
+    rm -f "$CONFIG_FILE_GLOBAL"
+}
+test_config_init_global
+
+test_config_init_project() {
+    source_workflow_funcs
+    rm -rf "$CONFIG_DIR_PROJECT"
+    config_init project >/dev/null 2>&1
+    assert_file_exists "project config 创建" "$CONFIG_FILE_PROJECT"
+    assert_file_exists "project .gitignore 创建" "$CONFIG_DIR_PROJECT/.gitignore"
+    # 项目配置不应包含 api_key 字段
+    local has_key
+    has_key=$(jq -r 'has("glm") and (.glm | has("api_key"))' "$CONFIG_FILE_PROJECT")
+    assert_eq "project config 不应包含 glm.api_key" "false" "$has_key"
+    rm -rf "$CONFIG_DIR_PROJECT"
+}
+test_config_init_project
+
+test_config_init_existing_no_force() {
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL"
+    echo '{"review":{"backend":"codex"}}' > "$CONFIG_FILE_GLOBAL"
+    config_init >/dev/null 2>&1
+    # 文件未被覆盖
+    local backend
+    backend=$(jq -r '.review.backend' "$CONFIG_FILE_GLOBAL")
+    assert_eq "已存在时不覆盖" "codex" "$backend"
+    rm -f "$CONFIG_FILE_GLOBAL"
+}
+test_config_init_existing_no_force
+
+test_config_show_masks_key() {
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL"
+    echo '{"glm":{"api_key":"abcd1234secretxyz"}}' > "$CONFIG_FILE_GLOBAL"
+    local output
+    output=$(config_show 2>&1)
+    # 明文 key 不应出现
+    if echo "$output" | grep -q "abcd1234secretxyz"; then
+        echo "  ✗ config show 泄漏明文 key"
+        ((FAIL++))
+    else
+        echo "  ✓ config show 不泄漏明文 key"
+        ((PASS++))
+    fi
+    # 掩码应出现
+    assert_contains "config show 显示掩码" "abcd\*\*\*" "$output"
+    rm -f "$CONFIG_FILE_GLOBAL"
+}
+test_config_show_masks_key
+
+test_config_get_masks_api_key() {
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL"
+    echo '{"glm":{"api_key":"abcd1234secretxyz"}}' > "$CONFIG_FILE_GLOBAL"
+    local output
+    output=$(config_get_cmd glm.api_key)
+    if [[ "$output" == "abcd1234secretxyz" ]]; then
+        echo "  ✗ config get glm.api_key 泄漏明文"
+        ((FAIL++))
+    else
+        echo "  ✓ config get glm.api_key 掩码"
+        ((PASS++))
+    fi
+    rm -f "$CONFIG_FILE_GLOBAL"
+}
+test_config_get_masks_api_key
+
+test_config_init_project_preserves_gitignore() {
+    # Sparring CONCERN 1: config init project 不应覆盖已有的 .gitignore
+    source_workflow_funcs
+    rm -rf "$CONFIG_DIR_PROJECT"
+    mkdir -p "$CONFIG_DIR_PROJECT"
+    cat > "$CONFIG_DIR_PROJECT/.gitignore" <<'EOF'
+# 用户现有规则
+*.log
+tmp/
+EOF
+    config_init project >/dev/null 2>&1
+    # 原有规则必须保留
+    assert_contains "原有 *.log 规则保留" "\*\.log" "$(cat "$CONFIG_DIR_PROJECT/.gitignore")"
+    assert_contains "原有 tmp/ 规则保留" "tmp/" "$(cat "$CONFIG_DIR_PROJECT/.gitignore")"
+    # 新规则也追加进去
+    assert_contains "新增 *.local.json 规则" "\*\.local\.json" "$(cat "$CONFIG_DIR_PROJECT/.gitignore")"
+    rm -rf "$CONFIG_DIR_PROJECT"
+}
+test_config_init_project_preserves_gitignore
+
+test_config_init_project_no_secrets_file_mention() {
+    # Sparring CONCERN 2: .gitignore 模板不应误导用户以为 secrets.json 会被读取
+    source_workflow_funcs
+    rm -rf "$CONFIG_DIR_PROJECT"
+    config_init project >/dev/null 2>&1
+    # 不应在 config.json 或 .gitignore 里出现显式的 secrets.json 引用（避免误导）
+    if grep -q "^secrets\.json$" "$CONFIG_DIR_PROJECT/.gitignore" 2>/dev/null; then
+        echo "  ✗ .gitignore 仍显式提 secrets.json（误导）"
+        ((FAIL++))
+    else
+        echo "  ✓ .gitignore 不再显式提 secrets.json"
+        ((PASS++))
+    fi
+    # 项目 config.json 注释必须明确说 api_key 不放这里
+    local comment
+    comment=$(jq -r '._comment // ""' "$CONFIG_FILE_PROJECT")
+    assert_contains "项目 config 注释警告 api_key 不放这里" "api_key" "$comment"
+    rm -rf "$CONFIG_DIR_PROJECT"
+}
+test_config_init_project_no_secrets_file_mention
+
+test_config_read_file_warns_once() {
+    # Sparring CONCERN 3: 非法 JSON 的告警在同一进程只出现一次
+    source_workflow_funcs
+    mkdir -p "$CONFIG_DIR_GLOBAL"
+    echo 'not valid json {' > "$CONFIG_FILE_GLOBAL"
+    # 调用多次 _config_get，触发多次读
+    local err_output
+    err_output=$({ _config_get review.backend; _config_get review.timeout; _config_get glm.model; } 2>&1 >/dev/null)
+    local warn_count
+    warn_count=$(echo "$err_output" | grep -c "配置文件格式错误")
+    assert_eq "非法 JSON 只告警一次" "1" "$warn_count"
+    rm -f "$CONFIG_FILE_GLOBAL"
+}
+test_config_read_file_warns_once
 
 echo ""
 echo "=== commands/ frontmatter ==="

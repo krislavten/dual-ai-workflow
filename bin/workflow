@@ -15,15 +15,17 @@ NC='\033[0m'
 
 # 配置
 MAX_REVIEW_ROUNDS=5
-AGENT_TIMEOUT="${WORKFLOW_REVIEW_TIMEOUT:-60}"
-# RETRIES = 失败后重试次数（默认 1，即最多 2 次尝试：1 次主 + 1 次重试）
-AGENT_RETRIES="${WORKFLOW_REVIEW_RETRIES:-1}"
+# AGENT_TIMEOUT / AGENT_RETRIES 由 _config_get 惰性求值，见下方 Config 段
 # 内部循环总尝试次数 = retries + 1（保底至少 1 次）
 _agent_attempts() {
-    local n=$(( ${AGENT_RETRIES:-1} + 1 ))
+    local retries
+    retries=$(_config_get review.retries)
+    local n=$(( retries + 1 ))
     [[ $n -lt 1 ]] && n=1
     echo $n
 }
+# 兼容访问器（延迟求值，读当前 config）
+_agent_timeout() { _config_get review.timeout; }
 # Resolve symlink to find real script location
 _resolve_script_dir() {
     local src="$0"
@@ -56,10 +58,12 @@ _normalize_backend() {
 }
 
 get_review_backend() {
-    local raw="${WORKFLOW_REVIEW_BACKEND:-$REVIEW_BACKEND_DEFAULT}"
+    local raw
+    raw=$(_config_get review.backend)
+    [[ -z "$raw" ]] && raw="$REVIEW_BACKEND_DEFAULT"
     local backend
     if ! backend=$(_normalize_backend "$raw"); then
-        echo -e "${RED}错误: WORKFLOW_REVIEW_BACKEND 仅支持 cursor / codex / glm${NC}" >&2
+        echo -e "${RED}错误: review.backend 仅支持 cursor / codex / glm${NC}" >&2
         echo "  收到: '${raw}'" >&2
         return 1
     fi
@@ -68,11 +72,12 @@ get_review_backend() {
 
 # 降级后端，空值表示未配置
 get_review_backend_fallback() {
-    local raw="${WORKFLOW_REVIEW_BACKEND_FALLBACK:-}"
+    local raw
+    raw=$(_config_get review.fallback)
     [[ -z "$raw" ]] && return 0
     local backend
     if ! backend=$(_normalize_backend "$raw"); then
-        echo -e "${RED}错误: WORKFLOW_REVIEW_BACKEND_FALLBACK 仅支持 cursor / codex / glm${NC}" >&2
+        echo -e "${RED}错误: review.fallback 仅支持 cursor / codex / glm${NC}" >&2
         echo "  收到: '${raw}'" >&2
         return 1
     fi
@@ -168,9 +173,12 @@ check_glm() {
         echo -e "${RED}错误: 未找到 curl 命令${NC}" >&2
         return 1
     fi
-    if [[ -z "${WORKFLOW_GLM_API_KEY:-}" ]]; then
-        echo -e "${RED}错误: 未设置 WORKFLOW_GLM_API_KEY${NC}" >&2
-        echo "  export WORKFLOW_GLM_API_KEY=<id.secret>" >&2
+    local key
+    key=$(_config_get glm.api_key)
+    if [[ -z "$key" ]]; then
+        echo -e "${RED}错误: 未配置 glm.api_key${NC}" >&2
+        echo "  方式1: workflow config init 写入 ~/.config/sparring/config.json" >&2
+        echo "  方式2: export SPARRING_GLM_API_KEY=<id.secret>" >&2
         echo "  获取: https://open.bigmodel.cn/usercenter/apikeys" >&2
         return 1
     fi
@@ -196,6 +204,146 @@ find_project_root() {
 
 PROJECT_ROOT="$(find_project_root)"
 WORKFLOW_DIR="${PROJECT_ROOT}/.workflow"
+
+# ─── 配置层（default < global < project < env） ──────────
+# global: ~/.config/sparring/config.json
+# project: <PROJECT_ROOT>/.sparring/config.json
+# env: SPARRING_* 或 WORKFLOW_*（兼容别名）
+
+CONFIG_DIR_GLOBAL="${XDG_CONFIG_HOME:-$HOME/.config}/sparring"
+CONFIG_FILE_GLOBAL="${CONFIG_DIR_GLOBAL}/config.json"
+CONFIG_DIR_PROJECT="${PROJECT_ROOT}/.sparring"
+CONFIG_FILE_PROJECT="${CONFIG_DIR_PROJECT}/config.json"
+
+# 内置默认 — 所有可配置字段都要在这里给出非 null 默认或显式 null
+_config_defaults() {
+    cat <<'EOF'
+{
+  "review": {
+    "backend": "cursor",
+    "fallback": null,
+    "timeout": 60,
+    "retries": 1
+  },
+  "cursor": {
+    "model": null
+  },
+  "codex": {
+    "model": null,
+    "effort": null,
+    "home": null
+  },
+  "glm": {
+    "api_key": null,
+    "model": "glm-5.1",
+    "thinking": "disabled",
+    "max_tokens": 8192,
+    "temperature": 0.3,
+    "api_base": "https://open.bigmodel.cn/api/paas/v4"
+  }
+}
+EOF
+}
+
+# 读 JSON 文件，不存在或格式错返回 {}
+# 格式错每文件只告警一次（哨兵文件写到 /tmp，避免 $(...) subshell 里 export 丢失）
+# 哨兵文件以 PID + 文件路径的 hash 命名，脚本退出时由 trap 清理
+_config_warn_sentinel() {
+    local file="$1"
+    local safe
+    safe=$(printf '%s' "$file" | tr -c 'A-Za-z0-9' '_')
+    echo "${TMPDIR:-/tmp}/workflow-cfg-warn-$$-${safe}"
+}
+
+_config_read_file() {
+    local file="$1"
+    [[ ! -f "$file" ]] && { echo '{}'; return 0; }
+    if ! jq -e '.' "$file" >/dev/null 2>&1; then
+        local sentinel
+        sentinel=$(_config_warn_sentinel "$file")
+        if [[ ! -f "$sentinel" ]]; then
+            echo -e "${YELLOW}⚠ 配置文件格式错误，忽略: ${file}${NC}" >&2
+            echo -e "${DIM}  (本次运行仅提示一次；用 jq . 该文件自查)${NC}" >&2
+            touch "$sentinel" 2>/dev/null || true
+        fi
+        echo '{}'
+        return 0
+    fi
+    cat "$file"
+}
+
+# 哨兵文件留在 /tmp 里，PID 防冲突；进程结束后文件无人用。
+# 不 trap EXIT 清理，避免在 $(...) 子 shell 退出时误删正在用的哨兵。
+
+# 合并 default + global + project，后者覆盖前者（递归合并）
+_config_merged() {
+    local defaults global project
+    defaults=$(_config_defaults)
+    global=$(_config_read_file "$CONFIG_FILE_GLOBAL")
+    project=$(_config_read_file "$CONFIG_FILE_PROJECT")
+    # jq 的 * 是递归合并
+    jq -n --argjson a "$defaults" --argjson b "$global" --argjson c "$project" '$a * $b * $c'
+}
+
+# key.path 转环境变量名（点号转下划线、全大写）
+_env_name_for_path() {
+    printf '%s' "$1" | tr '[:lower:].' '[:upper:]_'
+}
+
+# 读单个配置值
+# _config_get <key.path>
+# 优先级：SPARRING_<KEY> > WORKFLOW_<KEY>（兼容） > project > global > default
+# Usage: _config_get review.backend
+#        _config_get glm.api_key
+_config_get() {
+    local path="$1"
+    [[ -z "$path" ]] && { echo ""; return 0; }
+
+    local env_suffix
+    env_suffix=$(_env_name_for_path "$path")
+    local sparring_var="SPARRING_${env_suffix}"
+    local workflow_var="WORKFLOW_${env_suffix}"
+
+    # SPARRING_* 最高优先级
+    if [[ -n "${!sparring_var:-}" ]]; then
+        printf '%s' "${!sparring_var}"
+        return 0
+    fi
+    # WORKFLOW_* 兼容别名（schema 对齐的名字）
+    if [[ -n "${!workflow_var:-}" ]]; then
+        printf '%s' "${!workflow_var}"
+        return 0
+    fi
+    # WORKFLOW_* 历史命名的兼容别名（e.g. WORKFLOW_REVIEW_BACKEND_FALLBACK → review.fallback）
+    local legacy
+    if legacy=$(_workflow_legacy_alias "$path"); then
+        printf '%s' "$legacy"
+        return 0
+    fi
+
+    # 从合并后的 JSON 取值
+    local jq_filter=".${path}"
+    local val
+    val=$(_config_merged | jq -r "${jq_filter} // \"\"" 2>/dev/null)
+    # jq 把 null 渲染成 "null" 字符串时（用 // 后不会，但兜底），统一视为空
+    [[ "$val" == "null" ]] && val=""
+    printf '%s' "$val"
+}
+
+# WORKFLOW_* 历史变量到新字段的别名映射（只处理两个不符合 naming convention 的）
+# SPARRING_* 前缀是新引入的，直接跟 schema 对齐（如 SPARRING_REVIEW_FALLBACK），不需要 legacy map
+_workflow_legacy_alias() {
+    local path="$1"
+    case "$path" in
+        review.fallback)
+            [[ -n "${WORKFLOW_REVIEW_BACKEND_FALLBACK:-}" ]] && { printf '%s' "$WORKFLOW_REVIEW_BACKEND_FALLBACK"; return 0; }
+            ;;
+        cursor.model)
+            [[ -n "${WORKFLOW_AGENT_MODEL:-}" ]] && { printf '%s' "$WORKFLOW_AGENT_MODEL"; return 0; }
+            ;;
+    esac
+    return 1
+}
 PLANS_DIR="${WORKFLOW_DIR}/plans"
 REVIEW_JOBS_DIR="${WORKFLOW_DIR}/review-jobs"
 
@@ -747,8 +895,10 @@ ${AGENT_SYSTEM_PROMPT}
 ${prompt}"
     fi
 
-    # 允许环境变量覆盖
-    local model="${WORKFLOW_AGENT_MODEL:-$AGENT_MODEL}"
+    # 配置优先级: env (SPARRING_AGENT_MODEL / WORKFLOW_AGENT_MODEL) > config > agents/cursor.md
+    local model
+    model=$(_config_get cursor.model)
+    [[ -z "$model" ]] && model="$AGENT_MODEL"
 
     # 读取 chat_id 用于 resume
     local chat_id=""
@@ -769,10 +919,10 @@ ${prompt}"
 
     for i in $(seq 1 $max_attempts); do
         if [[ ${#resume_args[@]} -gt 0 ]]; then
-            result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "${AGENT_TIMEOUT}" \
+            result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "$(_agent_timeout)" \
                 agent --print --trust --model "$model" "${resume_args[@]}" "$prompt" 2>&1) && break
         else
-            result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "${AGENT_TIMEOUT}" \
+            result=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "$(_agent_timeout)" \
                 agent --print --trust --model "$model" "$prompt" 2>&1) && break
         fi
 
@@ -798,9 +948,11 @@ call_codex_agent() {
 
     check_codex || return 1
 
-    local model="${WORKFLOW_CODEX_MODEL:-}"
-    local effort="${WORKFLOW_CODEX_EFFORT:-}"
-    local codex_home="${WORKFLOW_CODEX_HOME:-${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}}"
+    local model effort codex_home
+    model=$(_config_get codex.model)
+    effort=$(_config_get codex.effort)
+    codex_home=$(_config_get codex.home)
+    [[ -z "$codex_home" ]] && codex_home="${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}"
     mkdir -p "$codex_home"
 
     local output_file
@@ -845,7 +997,7 @@ EOF
     echo -e "${DIM}  CODEX_HOME: ${codex_home}${NC}" >&2
 
     for i in $(seq 1 $max_attempts); do
-        if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd "${AGENT_TIMEOUT}" \
+        if HTTP_PROXY= HTTPS_PROXY= CODEX_HOME="$codex_home" _timeout_cmd "$(_agent_timeout)" \
             "${codex_cmd[@]}" < "$prompt_file" > "$command_output_file" 2>&1; then
             break
         fi
@@ -890,11 +1042,13 @@ call_glm_agent() {
 
     check_glm || return 1
 
-    local api_base="${WORKFLOW_GLM_API_BASE:-https://open.bigmodel.cn/api/paas/v4}"
-    local model="${WORKFLOW_GLM_MODEL:-glm-5.1}"
-    local thinking="${WORKFLOW_GLM_THINKING:-disabled}"
-    local max_tokens="${WORKFLOW_GLM_MAX_TOKENS:-8192}"
-    local temperature="${WORKFLOW_GLM_TEMPERATURE:-0.3}"
+    local api_base model thinking max_tokens temperature api_key
+    api_base=$(_config_get glm.api_base)
+    model=$(_config_get glm.model)
+    thinking=$(_config_get glm.thinking)
+    max_tokens=$(_config_get glm.max_tokens)
+    temperature=$(_config_get glm.temperature)
+    api_key=$(_config_get glm.api_key)
 
     # 把 reviewer 指令前缀拼到用户 prompt，跟 codex 分支对齐
     local full_prompt="你在 Dual AI Workflow 中担任严格 reviewer。
@@ -938,13 +1092,13 @@ ${prompt}"
     local result=""
 
     for i in $(seq 1 $max_attempts); do
-        http_status=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "${AGENT_TIMEOUT}" \
+        http_status=$(HTTP_PROXY= HTTPS_PROXY= _timeout_cmd "$(_agent_timeout)" \
             curl -sS -w '%{http_code}' -o "$response_file" \
                 --connect-timeout 10 \
-                --max-time "${AGENT_TIMEOUT}" \
+                --max-time "$(_agent_timeout)" \
                 -X POST "${api_base}/chat/completions" \
                 -H "Content-Type: application/json" \
-                -H "Authorization: Bearer ${WORKFLOW_GLM_API_KEY}" \
+                -H "Authorization: Bearer ${api_key}" \
                 -d "$payload" 2>/dev/null) || http_status="000"
 
         if [[ "$http_status" == "200" ]]; then
@@ -974,7 +1128,7 @@ ${prompt}"
         rm -f "$response_file"
         if [[ "$has_reasoning" == "true" ]]; then
             echo -e "${RED}错误: glm 返回空 content（finish_reason 可能是 length — reasoning 吃完了 max_tokens）${NC}" >&2
-            echo -e "${DIM}  建议: export WORKFLOW_GLM_MAX_TOKENS=65536 或 WORKFLOW_GLM_THINKING=disabled${NC}" >&2
+            echo -e "${DIM}  建议: 调大 glm.max_tokens 到 65536 或关闭 glm.thinking${NC}" >&2
         else
             echo -e "${RED}错误: glm 返回空 content${NC}" >&2
         fi
@@ -1986,6 +2140,166 @@ show_status() {
     ls -lh "${task_dir}/"
 }
 
+# ─── Config 子命令 ──────────────────────────────────────────
+
+# 返回给用户看的配置视图：合并后 + key 字段做掩码
+_config_masked_view() {
+    _config_merged | jq '
+        def mask(v):
+            if v == null or v == "" then v
+            else
+                (v | tostring) as $s
+                | if ($s | length) <= 8 then "***"
+                  else ($s[0:4]) + "***" + ($s[-4:])
+                  end
+            end;
+        (.glm.api_key |= mask(.))
+    '
+}
+
+config_show() {
+    echo -e "${BLUE}=== Sparring 配置（合并后）===${NC}"
+    echo ""
+    echo -e "${DIM}优先级: env (SPARRING_*/WORKFLOW_*) > project (.sparring/config.json) > global (~/.config/sparring/config.json) > 默认${NC}"
+    echo ""
+    _config_masked_view
+    echo ""
+    echo -e "${BLUE}配置文件:${NC}"
+    echo "  global:  ${CONFIG_FILE_GLOBAL} $([[ -f "$CONFIG_FILE_GLOBAL" ]] && echo "(存在)" || echo "(未创建)")"
+    echo "  project: ${CONFIG_FILE_PROJECT} $([[ -f "$CONFIG_FILE_PROJECT" ]] && echo "(存在)" || echo "(未创建)")"
+}
+
+config_path() {
+    echo "global:  ${CONFIG_FILE_GLOBAL}"
+    echo "project: ${CONFIG_FILE_PROJECT}"
+}
+
+config_get_cmd() {
+    local path="${1:-}"
+    if [[ -z "$path" ]]; then
+        echo -e "${RED}错误: 请提供 key 路径${NC}" >&2
+        echo "用法: workflow config get <key.path>" >&2
+        echo "示例: workflow config get glm.api_key" >&2
+        return 1
+    fi
+    local val
+    val=$(_config_get "$path")
+    # 敏感字段打掩码
+    case "$path" in
+        *api_key|*token|*secret*)
+            if [[ -n "$val" && ${#val} -gt 8 ]]; then
+                val="${val:0:4}***${val: -4}"
+            elif [[ -n "$val" ]]; then
+                val="***"
+            fi
+            ;;
+    esac
+    echo "$val"
+}
+
+config_init() {
+    local project_mode=false
+    local force=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--scope-project|project) project_mode=true; shift ;;
+            -g|--scope-global|global) project_mode=false; shift ;;
+            -f|--force) force=true; shift ;;
+            *) echo -e "${RED}未知选项: $1${NC}" >&2; return 1 ;;
+        esac
+    done
+
+    local target dir
+    if $project_mode; then
+        target="$CONFIG_FILE_PROJECT"
+        dir="$CONFIG_DIR_PROJECT"
+    else
+        target="$CONFIG_FILE_GLOBAL"
+        dir="$CONFIG_DIR_GLOBAL"
+    fi
+
+    if [[ -f "$target" ]] && ! $force; then
+        echo -e "${YELLOW}配置已存在: ${target}${NC}"
+        echo "  加 --force 覆盖，或直接编辑该文件。"
+        return 0
+    fi
+
+    mkdir -p "$dir"
+
+    if $project_mode; then
+        # 项目级：只放 backend 选型，绝不放 api_key。
+        # 项目级配置不支持 secrets 文件 — api_key 只能放全局 config 或 SPARRING_GLM_API_KEY env。
+        cat > "$target" <<'EOF'
+{
+  "_comment": "项目级 Sparring 配置（团队共享）。切勿在这里填 api_key — 项目 config 只支持 backend 选型等非敏感字段。api_key 放全局 ~/.config/sparring/config.json 或 SPARRING_GLM_API_KEY 环境变量。",
+  "review": {
+    "backend": "cursor",
+    "fallback": "glm"
+  }
+}
+EOF
+        # 安全追加 .gitignore：存在则只补齐缺失规则，不覆盖用户现有规则
+        local gi="${dir}/.gitignore"
+        local want_rules=("*.local.json" "*.secret.json")
+        if [[ -f "$gi" ]]; then
+            for rule in "${want_rules[@]}"; do
+                if ! grep -Fxq "$rule" "$gi" 2>/dev/null; then
+                    printf '%s\n' "$rule" >> "$gi"
+                fi
+            done
+        else
+            {
+                echo "# Sparring — 屏蔽可能含敏感信息的本地/衍生文件"
+                echo "# 注意: api_key 只应放在全局 ~/.config/sparring/config.json 或 SPARRING_GLM_API_KEY 环境变量"
+                echo "# 项目级 config.json 默认入库用于团队共享"
+                printf '%s\n' "${want_rules[@]}"
+            } > "$gi"
+        fi
+        echo -e "${GREEN}✓ 项目级配置已创建: ${target}${NC}"
+        echo "  ${dir}/.gitignore 已就绪（屏蔽 *.local.json / *.secret.json）"
+        echo -e "${YELLOW}  ⚠ 不要在 ${target} 里填 api_key — 项目 config 只支持非敏感字段${NC}"
+        echo "  api_key 放全局: workflow config init  或  export SPARRING_GLM_API_KEY=..."
+    else
+        # 全局：含 key 占位符。chmod 600
+        cat > "$target" <<'EOF'
+{
+  "_comment": "全局 Sparring 配置。含 API key，已 chmod 600。不要入库。",
+  "review": {
+    "backend": "cursor",
+    "fallback": "glm",
+    "timeout": 60,
+    "retries": 1
+  },
+  "glm": {
+    "api_key": "",
+    "model": "glm-5.1",
+    "thinking": "disabled"
+  }
+}
+EOF
+        chmod 600 "$target"
+        echo -e "${GREEN}✓ 全局配置已创建: ${target}${NC} (chmod 600)"
+        echo "  编辑该文件填入 glm.api_key，或用 SPARRING_GLM_API_KEY 环境变量。"
+        echo "  获取 GLM key: https://open.bigmodel.cn/usercenter/apikeys"
+    fi
+}
+
+config_cmd() {
+    local sub="${1:-show}"
+    shift 2>/dev/null || true
+    case "$sub" in
+        show)   config_show "$@" ;;
+        path)   config_path "$@" ;;
+        get)    config_get_cmd "$@" ;;
+        init)   config_init "$@" ;;
+        *)
+            echo -e "${RED}未知子命令: ${sub}${NC}" >&2
+            echo "用法: workflow config <show|path|get|init>" >&2
+            return 1
+            ;;
+    esac
+}
+
 # ─── 验证环境 ────────────────────────────────────────────────
 
 _verify_cursor() {
@@ -1999,7 +2313,9 @@ _verify_cursor() {
     fi
 
     load_agent_config "cursor"
-    local verify_model="${WORKFLOW_AGENT_MODEL:-$AGENT_MODEL}"
+    local verify_model
+    verify_model=$(_config_get cursor.model)
+    [[ -z "$verify_model" ]] && verify_model="$AGENT_MODEL"
     echo -e "  配置文件: ${AGENTS_DIR}/cursor.md"
     echo -e "  模型: ${verify_model}"
     if [[ -n "$AGENT_SYSTEM_PROMPT" ]]; then
@@ -2033,9 +2349,11 @@ _verify_codex() {
         return 1
     fi
 
-    local codex_model="${WORKFLOW_CODEX_MODEL:-}"
-    local codex_effort="${WORKFLOW_CODEX_EFFORT:-}"
-    local codex_home="${WORKFLOW_CODEX_HOME:-${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}}"
+    local codex_model codex_effort codex_home
+    codex_model=$(_config_get codex.model)
+    codex_effort=$(_config_get codex.effort)
+    codex_home=$(_config_get codex.home)
+    [[ -z "$codex_home" ]] && codex_home="${TMPDIR:-/tmp}/workflow-codex-home-${USER:-user}"
     mkdir -p "$codex_home"
     echo -e "  模型: ${codex_model:-default(config.toml)}"
     echo -e "  推理: ${codex_effort:-default(config.toml)}"
@@ -2093,18 +2411,20 @@ _verify_glm() {
         return 1
     fi
 
-    echo -n "WORKFLOW_GLM_API_KEY: "
-    if [[ -z "${WORKFLOW_GLM_API_KEY:-}" ]]; then
-        echo -e "${RED}✗ 未设置${NC}"
-        echo -e "${DIM}  export WORKFLOW_GLM_API_KEY=<id.secret>${NC}"
+    local api_key api_base model thinking
+    api_key=$(_config_get glm.api_key)
+    api_base=$(_config_get glm.api_base)
+    model=$(_config_get glm.model)
+    thinking=$(_config_get glm.thinking)
+
+    echo -n "glm.api_key: "
+    if [[ -z "$api_key" ]]; then
+        echo -e "${RED}✗ 未配置${NC}"
+        echo -e "${DIM}  workflow config init  或  export SPARRING_GLM_API_KEY=<id.secret>${NC}"
         return 1
     fi
-    local key_masked="${WORKFLOW_GLM_API_KEY:0:4}***${WORKFLOW_GLM_API_KEY: -4}"
+    local key_masked="${api_key:0:4}***${api_key: -4}"
     echo -e "${GREEN}✓ ${key_masked}${NC}"
-
-    local api_base="${WORKFLOW_GLM_API_BASE:-https://open.bigmodel.cn/api/paas/v4}"
-    local model="${WORKFLOW_GLM_MODEL:-glm-5.1}"
-    local thinking="${WORKFLOW_GLM_THINKING:-disabled}"
     echo -e "  API base: ${api_base}"
     echo -e "  模型: ${model}"
     echo -e "  thinking: ${thinking}"
@@ -2120,7 +2440,7 @@ _verify_glm() {
             --connect-timeout 10 --max-time 25 \
             -X POST "${api_base}/chat/completions" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${WORKFLOW_GLM_API_KEY}" \
+            -H "Authorization: Bearer ${api_key}" \
             -d "$payload" 2>/dev/null) || http_status="000"
 
     if [[ "$http_status" == "200" ]]; then
@@ -2175,7 +2495,7 @@ verify() {
     fi
 
     echo -n "超时: "
-    echo -e "${GREEN}${AGENT_TIMEOUT}s${NC}  重试次数: ${AGENT_RETRIES} (共 $(_agent_attempts) 次尝试)"
+    echo -e "${GREEN}$(_agent_timeout)s${NC}  重试次数: $(_config_get review.retries) (共 $(_agent_attempts) 次尝试)"
 
     _verify_backend "主 backend" "$primary" || ok=false
 
@@ -2221,7 +2541,11 @@ main() {
         case "$1" in
             --project)
                 shift
-                set_project "${1:-}" || exit 1
+                if [[ $# -eq 0 ]]; then
+                    echo -e "${RED}错误: --project 需要一个 URL 参数${NC}" >&2
+                    exit 1
+                fi
+                set_project "$1" || exit 1
                 shift
                 ;;
             *) args+=("$1"); shift ;;
@@ -2253,6 +2577,7 @@ main() {
         list)                list_tasks ;;
         status)              show_status "$@" ;;
         verify)              verify ;;
+        config)              config_cmd "$@" ;;
         issue-poll)          issue_poll "$@" ;;
         issue-claim)         issue_claim "$@" ;;
         issue-comment)       issue_comment "$@" ;;
@@ -2304,33 +2629,37 @@ ${YELLOW}GitHub Issue 集成:${NC}
   ${GREEN}issue-done${NC} <number> [pr_url]  标记完成 (状态 → Reviewing + 发布 comment)
   ${GREEN}issue-status${NC} <number> <status> 更新 issue 看板状态
 
+${YELLOW}配置:${NC}
+  ${GREEN}config init${NC}                 生成 ~/.config/sparring/config.json
+  ${GREEN}config init project${NC}         生成 .sparring/config.json（项目级，团队共享）
+  ${GREEN}config show${NC}                 显示合并后的生效配置（key 打掩码）
+  ${GREEN}config path${NC}                 打印 global / project 配置文件路径
+  ${GREEN}config get <key.path>${NC}       取单个值，如 config get glm.api_key
+
 ${YELLOW}全局选项:${NC}
   ${GREEN}--project${NC} <url>               指定 GitHub Project 看板 URL
-                                (例: https://github.com/orgs/xxx/projects/3)
 
-${YELLOW}环境变量 — Reviewer Backend:${NC}
-  WORKFLOW_REVIEW_BACKEND          主 backend: cursor|codex|glm (默认: ${REVIEW_BACKEND_DEFAULT})
-  WORKFLOW_REVIEW_BACKEND_FALLBACK 备 backend: 主失败时自动降级 (默认: 未配置)
-  WORKFLOW_REVIEW_TIMEOUT          单次调用超时秒数 (默认: 60)
-  WORKFLOW_REVIEW_RETRIES          失败后重试次数 (默认: 1，即最多尝试 2 次)
+${YELLOW}配置文件（优先级从低到高）:${NC}
+  内置默认 → global (${CONFIG_FILE_GLOBAL})
+          → project (.sparring/config.json)
+          → env 变量 (SPARRING_*, WORKFLOW_* 兼容)
 
-${YELLOW}环境变量 — Cursor backend:${NC}
-  WORKFLOW_AGENT_MODEL    cursor 使用的模型 (读取 agents/cursor.md)
+${YELLOW}环境变量（可覆盖 config.json 任意字段）:${NC}
+  主推 SPARRING_* 前缀，SPARRING_<KEY_PATH> 对应 config 的 key.path（全大写、点转下划线）
+  兼容 WORKFLOW_* 前缀（历史变量）
 
-${YELLOW}环境变量 — Codex backend:${NC}
-  WORKFLOW_CODEX_MODEL    codex 使用的模型 (默认读取 codex config)
-  WORKFLOW_CODEX_EFFORT   codex 推理强度 (none|minimal|low|medium|high|xhigh)
-  WORKFLOW_CODEX_HOME     codex 本地状态目录 (默认: /tmp/workflow-codex-home-<user>)
+  ${DIM}示例:${NC}
+    SPARRING_REVIEW_BACKEND=glm     对应 review.backend
+    SPARRING_GLM_API_KEY=xxx.yyy    对应 glm.api_key
+    SPARRING_REVIEW_FALLBACK=glm    对应 review.fallback
+    SPARRING_REVIEW_TIMEOUT=120     对应 review.timeout
 
-${YELLOW}环境变量 — GLM backend (智谱):${NC}
-  WORKFLOW_GLM_API_KEY    智谱 API key (id.secret 格式，必填)
-  WORKFLOW_GLM_API_BASE   API base URL (默认: https://open.bigmodel.cn/api/paas/v4)
-  WORKFLOW_GLM_MODEL      模型 (默认: glm-5.1)
-  WORKFLOW_GLM_THINKING   思考链: enabled|disabled (默认: disabled，快)
-  WORKFLOW_GLM_MAX_TOKENS 最大 token (默认: 8192，开 thinking 时需调大)
-  WORKFLOW_GLM_TEMPERATURE 温度 (默认: 0.3)
+  ${DIM}历史兼容（仍生效）:${NC}
+    WORKFLOW_REVIEW_BACKEND_FALLBACK → review.fallback
+    WORKFLOW_AGENT_MODEL             → cursor.model
+    以及所有 WORKFLOW_* 形式的新 schema 变量
 
-${YELLOW}环境变量 — 其他:${NC}
+${YELLOW}Issue 相关环境变量:${NC}
   WORKFLOW_POLL_INTERVAL  issue 轮询间隔秒数 (默认: ${ISSUE_POLL_INTERVAL})
   WORKFLOW_ISSUE_LABEL    issue 筛选标签 (默认: ${ISSUE_LABEL})
   WORKFLOW_PROJECT_NUMBER project 编号 (环境变量或 --project)
