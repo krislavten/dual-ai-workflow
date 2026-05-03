@@ -1,143 +1,205 @@
-# Sparring
+<h1 align="center">🥊 Sparring</h1>
 
-A Claude Code plugin that brings automatic peer review to AI coding — one AI writes, another AI challenges.
+<p align="center">
+  <strong>One AI writes the code. Another AI challenges it.<br>
+  Like boxing sparring partners — pushing each other until the code is ship-ready.</strong>
+</p>
 
-Like sparring partners in boxing — they push each other to get better, not to win.
+<p align="center">
+  <a href="#-quick-start"><img src="https://img.shields.io/badge/Quick_Start-2_min-blue?style=for-the-badge" alt="Quick Start"></a>
+  <a href="#-core-features"><img src="https://img.shields.io/badge/Features-4_pillars-purple?style=for-the-badge" alt="Features"></a>
+  <a href="#-reviewer-backends"><img src="https://img.shields.io/badge/Backends-Cursor_%7C_Codex_%7C_GLM-green?style=for-the-badge" alt="Backends"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="License"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/plugin-Claude_Code-E9DBFC?logo=anthropic&logoColor=black" alt="Claude Code">
+  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/primary_%2B_fallback-auto--degrade-orange" alt="Fallback">
+  <img src="https://img.shields.io/badge/config-JSON_%2B_env-lightgrey" alt="Config">
+</p>
+
+**In one line:** You describe the task. Claude writes the proposal and code. Cursor / Codex / GLM challenges it. Human only steps in for key decisions.
+
+Sparring is a Claude Code plugin. It pairs Claude with a designated opponent — a second AI that assumes there's a bug and tries to find it. Up to 5 rounds, until both agree.
 
 [中文](README.md)
 
-## Why
+---
 
-AI agents write code fast, but mistakes slip through — hallucinated APIs, missed edge cases, subtle regressions. Having a human review every AI-generated change doesn't scale.
+## 📰 What's New
 
-**This plugin adds a second AI as an automatic reviewer.** Claude Code writes the proposal and code, and the reviewer can be Cursor Agent, Codex CLI, or Zhipu GLM with a strict, find-the-bug mindset — up to 5 rounds until both agree. You only step in for key decisions. Supports primary + fallback — the workflow auto-degrades to the fallback backend when the primary fails.
+- **2026-05** · 🔥 **Zhipu GLM** joins as a third reviewer backend with primary/fallback auto-degradation; new JSON config system (`~/.config/sparring/config.json` + `.sparring/config.json`) for team sharing; repo officially renamed to `sparring` (legacy `workflow` CLI preserved as a symlink)
+- **2026-04** · 🎯 Added **Codex CLI** backend + background review jobs (run long reviews asynchronously)
+- **2026-03** · Initial release: Claude + Cursor dual-AI collaboration with up to 5-round review; GitHub Issue–driven workflow (claim tasks from a Project board, sync discussions to Issue comments)
 
-The result: more reliable AI output, less manual review, lower cognitive load.
+---
 
-## Install
+## 🌟 Core Features
 
-```
+<table>
+<tr>
+<td width="50%">
+
+### 🥊 Adversarial Dual-AI Review
+One AI writes. Another finds flaws. Not mutual praise — mutual pressure, like boxing sparring partners. **Up to 5 rounds**, no release until both agree.
+
+</td>
+<td width="50%">
+
+### 🎛️ Three Backends + Primary/Fallback
+Choose `cursor` / `codex` / `glm`, or combine them as primary + fallback. When the primary CLI fails (timeout / network / process crash) the workflow auto-degrades to the fallback — no stall.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### ⚙️ Four-Tier Config System
+**Defaults → global config → project config → env vars**. API keys in global (chmod 600), backend choice in project (team-shared), temp overrides via env. One-shot `sparring config init`.
+
+</td>
+<td width="50%">
+
+### 📋 GitHub Issue–Driven
+Claim issues from your Project board, AI discussions auto-sync to Issue comments, PR on completion. Every comment carries an identity marker (🧠 Claude / 🤖 Cursor / 🧪 Codex / 🌟 GLM).
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🤔 Why Sparring
+
+AI writes code fast — but mistakes slip through: hallucinated APIs, missed edges, subtle regressions. Line-by-line human review doesn't scale.
+
+|  | Without Sparring | With Sparring |
+|---|---|---|
+| AI's every conclusion | Goes straight to you | Vetted by a second AI first |
+| Missed edge cases | 🤷 Caught in PR review | 🛡️ Caught during review loop |
+| Looks-right-but-broken | 😬 Discovered in production | 🎯 "Assume there's a bug" mindset catches it |
+| Cursor / Codex down? | ❌ Workflow stalls | 🔄 Auto-degrades to fallback |
+| Single-perspective blind spots | — | ✅ Always two viewpoints, lower blind-spot risk |
+
+**Result**: more reliable AI output, less manual review, lower cognitive load.
+
+---
+
+## 🚀 Quick Start
+
+### 1. Install the plugin
+
+```bash
+# Inside Claude Code
 /plugin marketplace add krislavten/sparring
 /plugin install sparring@sparring
 ```
 
-Restart your session (`/exit`, then reopen `claude`), then run `/sparring:setup` to install dependencies and configure the reviewer model.
-
-Pick your reviewer — **Cursor Agent / Codex CLI / Zhipu GLM**. Supports [primary + fallback](#primary--fallback) so a flaky primary doesn't block the workflow.
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/sparring:setup` | Install deps, select model, configure permissions |
-| `/sparring:workflow <task>` | Normal mode — co-design with user, auto peer review |
-| `/sparring:yolo <task>` | YOLO mode — fully automated, confirm commit only |
-| `/sparring:issue <project-url> [number]` | Issue mode — task from GitHub Issue |
-
-## How It Works
-
-```
-You describe the task
-  ↓
-Executor writes proposal
-  ↓
-Reviewer challenges proposal (up to 5 rounds)
-  ↓
-You approve
-  ↓
-Executor implements code
-  ↓
-Reviewer challenges code (up to 5 rounds)
-  ↓
-You approve and commit
-```
-
-**Cross-Review Principle**: Before giving you any conclusion, recommendation, or decision — the executor gets it reviewed by the other AI first. Not just proposals and code, but any significant technical advice.
-
-- **Normal mode** — You discuss the approach first, then AI pair handles review automatically
-- **YOLO mode** — AI handles everything end-to-end, you only confirm the final commit
-- **Issue mode** — Task comes from a GitHub Issue, all discussion syncs back to Issue comments
-
-## Issue-Driven Workflow
-
-A separate feature for teams that track work via GitHub Issues and Project boards.
-
-Provide a Project board URL when using Issue mode:
-```
-/sparring:issue https://github.com/orgs/your-org/projects/3 106
-```
-
-What it does:
-- Claims the issue, moves it to "In progress" on the board
-- All AI discussions sync to Issue comments with identity markers
-- Creates a PR when done, moves the issue to "Reviewing"
-
-No fixed project config needed — pass the board URL per session.
-
-## Multi-Agent Parallel + Review (with ClawTeam)
-
-Sparring handles review quality. [ClawTeam](https://github.com/HKUDS/ClawTeam) handles multi-agent parallel orchestration. Use them together — each agent works in parallel with automatic peer review.
-
-```
-ClawTeam splits 3 tasks in parallel
-  ├── Claude #1: auth module  ← Sparring: Cursor reviews
-  ├── Claude #2: database     ← Sparring: Cursor reviews
-  └── Claude #3: frontend     ← Sparring: Cursor reviews
-```
-
-### Install ClawTeam
+### 2. Initialize (auto-installs deps + selects models)
 
 ```bash
-pipx install clawteam
+# Restart Claude Code, then:
+/sparring:setup
 ```
 
-### Usage
+### 3. Go
 
 ```bash
-# 1. Create team
-clawteam team spawn-team my-project -d "Refactor user system" -n leader
-
-# 2. Spawn workers, each with Sparring review
-clawteam spawn tmux claude --team my-project --agent-name auth \
-  --task "Implement auth module. Run sparring review-code my-project when done for Cursor review"
-
-clawteam spawn tmux claude --team my-project --agent-name db \
-  --task "Implement database layer. Run sparring review-code my-project when done for Cursor review"
-
-# 3. Watch all agents work simultaneously
-clawteam board attach my-project
+/sparring:workflow add rate limiting to the login endpoint
 ```
 
-## Reviewer Backend Configuration
+That's it. Claude writes the proposal → Cursor challenges → you approve → Claude implements → Cursor challenges again → you ship.
 
-Three backends supported, freely combinable as primary + fallback:
+---
 
-| Backend | Description | Notes |
-|---------|-------------|-------|
-| `cursor` | Cursor Agent (default) | Uses local Cursor account |
-| `codex` | Codex CLI | Uses local OpenAI account |
-| `glm` | Zhipu GLM API | Pay-as-you-go, ideal as fallback |
+## 🎮 Three Modes
 
-### Configuration
+| Mode | Command | Use case |
+|------|---------|----------|
+| 💬 **Normal** | `/sparring:workflow <task>` | You discuss the approach first; AI pair handles review automatically; you ship |
+| 🚀 **YOLO** | `/sparring:yolo <task>` | Fully automated, you only confirm the final commit. Small changes / clear scope |
+| 🎫 **Issue** | `/sparring:issue <project-url> [number]` | Task from a GitHub Issue; discussions sync to Issue comments |
 
-Precedence (low → high): **built-in defaults → global config → project config → env vars**.
+---
+
+## 🔁 How It Works
+
+```
+   You describe the task
+            ↓
+  ┌──────────────────────┐
+  │ Claude writes proposal│
+  └──────────┬───────────┘
+             ↓
+  ┌──────────────────────┐    CONCERNS
+  │ Reviewer challenges it │─────────┐
+  └──────────┬───────────┘         ↓
+             ↓ APPROVE         Claude revises
+             ↓                  (up to 5 rounds)
+         You approve
+             ↓
+  ┌──────────────────────┐
+  │ Claude implements code│
+  └──────────┬───────────┘
+             ↓
+  ┌──────────────────────┐    CONCERNS
+  │ Reviewer challenges it │─────────┐
+  └──────────┬───────────┘         ↓
+             ↓ APPROVE         Claude fixes
+             ↓                  (up to 5 rounds)
+     You approve & ship
+```
+
+**Cross-review principle**: Before giving you **any** conclusion or recommendation, Claude runs it past the reviewer first. "Let's use Redis for caching" → reviewer challenges → Claude confirms or adjusts → then tells you.
+
+---
+
+## 🎛️ Reviewer Backends
+
+Three backends, freely combinable as primary + fallback:
+
+| Backend | Account | Notes | Best for |
+|---------|---------|-------|---------|
+| 🤖 `cursor` | Cursor subscription | Default, `gpt-5.3-codex-xhigh` | Daily driver |
+| 🧪 `codex` | OpenAI subscription | Codex CLI, tunable reasoning | Codex quota to burn |
+| 🌟 `glm` | Zhipu pay-as-you-go | Just needs an API key | Fallback / no subscription |
+
+### Primary + Fallback
+
+If the primary backend fails (timeout / network error / CLI crash), Sparring **auto-degrades** to the fallback. Workflow doesn't stall:
+
+```
+⚠ Primary backend Cursor Agent failed, falling back to GLM...
+```
+
+**Three common setups**:
+
+```jsonc
+// A) Cursor primary + GLM fallback (recommended — survives Cursor outages)
+{ "review": { "backend": "cursor", "fallback": "glm" } }
+
+// B) Codex primary + GLM fallback (preserve Codex quota)
+{ "review": { "backend": "codex", "fallback": "glm" } }
+
+// C) GLM only (no subscription, pay-as-you-go)
+{ "review": { "backend": "glm" } }
+```
+
+---
+
+## ⚙️ Configuration
+
+Precedence (low → high): **defaults → global → project → env vars**.
 
 ```bash
-# Generate global config (chmod 600, stores API key)
-sparring config init
-
-# Generate project config (team-shared backend choice; api_key stays global)
-sparring config init project
-
-# View merged effective config (keys masked)
-sparring config show
-
-# Get a single value
-sparring config get review.backend
-sparring config get glm.api_key   # returns masked
+sparring config init              # create ~/.config/sparring/config.json (chmod 600, stores api_key)
+sparring config init project      # create .sparring/config.json (team-shared, no key)
+sparring config show              # merged config (keys masked)
+sparring config get glm.api_key   # single value (sensitive fields masked)
 ```
 
-**Global config** `~/.config/sparring/config.json` (chmod 600, contains api_key, do not commit):
+**Global config** `~/.config/sparring/config.json` (contains api_key, do **not** commit):
 
 ```json
 {
@@ -154,7 +216,7 @@ sparring config get glm.api_key   # returns masked
 }
 ```
 
-**Project config** `.sparring/config.json` (commit by default for team sharing; `.sparring/.gitignore` blocks secrets):
+**Project config** `.sparring/config.json` (**commit by default**, team-shared backend choice):
 
 ```json
 {
@@ -165,72 +227,154 @@ sparring config get glm.api_key   # returns masked
 }
 ```
 
-### Primary + Fallback
+> ⚠️ **Never put `api_key` in project config** — it's tracked by git and will leak to every collaborator. Keys belong in the global config (chmod 600) or `SPARRING_GLM_API_KEY` env var.
 
-If the primary backend fails (timeout, network error, or any reviewer failure), the workflow falls back to the secondary.
-
-The log makes degradation explicit:
-```
-⚠ Primary backend Cursor Agent failed, falling back to GLM...
-```
-
-**Three common setups**:
-
-- **A) GLM only** — `review.backend = glm`, pay-as-you-go
-- **B) Cursor primary + GLM fallback** — recommended, survives Cursor outages (`review.backend = cursor`, `review.fallback = glm`)
-- **C) Codex primary + GLM fallback** — preserve Codex quota
-
-### Environment variables (override any config.json field)
-
-`SPARRING_*` is the preferred prefix; legacy `WORKFLOW_*` still works. Name mapping: `SPARRING_<UPPER_SNAKE>` → `key.path`.
+**Env var overrides** (`SPARRING_*` preferred; `WORKFLOW_*` kept for backward compat):
 
 ```bash
-# Common
-export SPARRING_REVIEW_BACKEND=glm       # review.backend
-export SPARRING_REVIEW_FALLBACK=cursor   # review.fallback
-export SPARRING_GLM_API_KEY=<id.secret>  # glm.api_key
-export SPARRING_REVIEW_TIMEOUT=120       # review.timeout
-export SPARRING_REVIEW_RETRIES=2         # review.retries
-
-# Legacy (still honored)
-export WORKFLOW_REVIEW_BACKEND=glm
-export WORKFLOW_REVIEW_BACKEND_FALLBACK=cursor
-export WORKFLOW_GLM_API_KEY=<id.secret>
+export SPARRING_REVIEW_BACKEND=glm       # → review.backend
+export SPARRING_GLM_API_KEY=<id.secret>  # → glm.api_key
+export SPARRING_REVIEW_TIMEOUT=120       # → review.timeout
 ```
 
-### Backend-specific parameters
+### Config reference
 
 | key | default | notes |
 |---|---|---|
-| `cursor.model` | from `agents/cursor.md` | override via `SPARRING_CURSOR_MODEL` |
-| `codex.model` | from codex config | e.g. `gpt-5.4` |
-| `codex.effort` | null | `none\|minimal\|low\|medium\|high\|xhigh` |
-| `codex.home` | `/tmp/workflow-codex-home-<user>` | codex local state |
-| `glm.api_key` | **required** | get one at <https://open.bigmodel.cn/usercenter/apikeys> |
-| `glm.model` | `glm-5.1` | other Zhipu models |
-| `glm.thinking` | `disabled` | `enabled` for better quality but slower |
+| `review.backend` | `cursor` | Primary: `cursor` / `codex` / `glm` |
+| `review.fallback` | `null` | Fallback backend (optional) |
+| `review.timeout` | `60` | Per-call timeout (seconds) |
+| `review.retries` | `1` | Retries after failure (total attempts = retries + 1) |
+| `cursor.model` | from `agents/cursor.md` | Cursor Agent model |
+| `codex.model` | from codex config | Codex model |
+| `codex.effort` | `null` | `none\|minimal\|low\|medium\|high\|xhigh` |
+| `codex.home` | `/tmp/workflow-codex-home-<user>` | Codex local state directory |
+| `glm.api_key` | **required** | [Get one](https://open.bigmodel.cn/usercenter/apikeys) |
+| `glm.model` | `glm-5.1` | Zhipu model |
+| `glm.thinking` | `disabled` | `enabled` for higher quality but slower |
 | `glm.max_tokens` | `8192` | bump to `65536` when thinking is enabled |
 | `glm.temperature` | `0.3` | review doesn't need high creativity |
 | `glm.api_base` | official URL | swap for self-hosted gateway |
 
+Run `sparring config show` anytime to inspect the full effective config.
+
 ### Verify
 
 ```bash
-sparring verify   # connectivity + model + masked key for primary/fallback
+sparring verify   # checks primary/fallback connectivity + model + masked key
 ```
 
-## Background Review Jobs (Optional)
+---
 
-For long-running reviews, run review jobs in the background:
+## 🎫 GitHub Issue–Driven Mode
+
+Built for teams using GitHub Issues + Project boards:
 
 ```bash
-sparring review-proposal-bg <task-id>
-sparring review-code-bg <task-id>
-
-sparring review-status [job-id|task-id]
-sparring review-result <job-id>
-sparring review-cancel <job-id>
+/sparring:issue https://github.com/orgs/your-org/projects/3 106
 ```
+
+Automatic flow: **claim issue → board moves to "In progress" → AI discussions sync to Issue comments → PR opens → board moves to "Reviewing"**.
+
+Every comment carries an identity marker:
+
+| Icon | Role | Purpose |
+|---|---|---|
+| 🧠 | Claude Code | Proposals, implementation |
+| 🤖 | Cursor Agent | Review feedback |
+| 🧪 | Codex CLI | Review feedback |
+| 🌟 | GLM | Review feedback |
+| 🔧 | Workflow | Status transitions |
+
+---
+
+## 🦞 Multi-Agent Parallel (with ClawTeam)
+
+Sparring handles review quality. [ClawTeam](https://github.com/HKUDS/ClawTeam) handles multi-agent orchestration. Together: each agent works in parallel with automatic peer review.
+
+```
+ClawTeam splits 3 tasks in parallel
+  ├── Claude #1: auth module  ← Sparring: reviewer
+  ├── Claude #2: database     ← Sparring: reviewer
+  └── Claude #3: frontend     ← Sparring: reviewer
+```
+
+```bash
+# Install ClawTeam
+pipx install clawteam
+
+# Create team + spawn workers (each runs Sparring review when done)
+clawteam team spawn-team my-project -d "refactor user system" -n leader
+clawteam spawn tmux claude --team my-project --agent-name auth \
+  --task "Implement auth module. Run sparring review-code my-project when done"
+clawteam board attach my-project   # watch all agents work simultaneously
+```
+
+**Issue + Team**: split large issues into parallel sub-tasks (see [ClawTeam docs](https://github.com/HKUDS/ClawTeam)).
+
+**Auto-claim**: have Claude poll your board:
+
+```bash
+/loop 5m /sparring:issue https://github.com/orgs/your-org/projects/3
+```
+
+---
+
+## 🧰 Background Reviews (optional)
+
+For long-running reviews:
+
+```bash
+sparring review-proposal-bg <task-id>    # launch background job
+sparring review-code-bg <task-id>
+sparring review-status [job-id|task-id]  # check status
+sparring review-result <job-id>          # view result
+sparring review-cancel <job-id>          # cancel
+```
+
+---
+
+## 🗺️ Command Reference
+
+```bash
+# Setup
+sparring setup                  # interactive installer
+sparring config init            # create global config
+sparring verify                 # check environment
+
+# Task lifecycle
+sparring create <name> <claude|cursor>
+sparring propose <task-id>
+sparring review-proposal <task-id>
+sparring implement <task-id>
+sparring review-code <task-id>
+sparring approve <task-id>
+sparring list
+sparring status <task-id>
+
+# Issue
+sparring --project <url> issue-poll
+sparring issue-claim <number>
+sparring issue-comment <number> <body>
+sparring issue-read <number>
+sparring issue-done <number> [pr-url]
+```
+
+Full list: `sparring help`. **Compat alias**: `workflow xxx` still works (`bin/workflow` is a symlink).
+
+---
+
+## 📚 Further Reading
+
+- [Mode details](MODES.md)
+- [Full examples](EXAMPLES.md)
+- [中文 README](README.md)
+
+---
+
+## 🤝 Contributing
+
+Issues and PRs welcome. This project itself is developed using Sparring — you can see every change on main has been through Cursor/Codex review.
 
 ## License
 
