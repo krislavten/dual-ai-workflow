@@ -49,7 +49,7 @@ Commit!
    sparring review-proposal <task-id>
 
    # Option B: Call agent directly
-   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "Review this proposal: ...")
+   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.5-extra-high "Review this proposal: ...")
    if echo "$response" | grep -qi "APPROVE"; then
      # approved
    else
@@ -68,7 +68,7 @@ Commit!
    sparring review-code <task-id>
 
    # Option B: Call agent directly
-   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "Review this code: $(git diff)")
+   response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.5-extra-high "Review this code: $(git diff)")
    if echo "$response" | grep -qi "APPROVE"; then
      # approved
    else

@@ -2,7 +2,7 @@
 
 ## Model
 
-model: gpt-5.3-codex-xhigh
+model: gpt-5.5-extra-high
 
 ## CLI Options
 

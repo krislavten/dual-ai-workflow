@@ -219,29 +219,29 @@ select_model() {
     echo -e "  模型决定 Cursor Agent review 的质量和速度。"
     echo -e "  推荐按项目重要性选择：${NC}"
     echo ""
-    echo -e "    1) ${BOLD}gpt-5.3-codex-xhigh${NC}  — 最高质量，适合重要项目 ${GREEN}(推荐)${NC}"
-    echo -e "    2) gpt-5.3-codex-high   — 高质量，速度稍快"
-    echo -e "    3) gpt-5.3-codex        — 标准质量，最快"
-    echo -e "    4) opus-4.6-thinking    — Claude Opus，适合偏好 Anthropic 模型"
-    echo -e "    5) 自定义               — 手动输入模型名"
+    echo -e "    1) ${BOLD}gpt-5.5-extra-high${NC}   — 最高质量，适合重要项目 ${GREEN}(推荐)${NC}"
+    echo -e "    2) gpt-5.5-high           — 高质量，速度稍快"
+    echo -e "    3) gpt-5.5-medium         — 标准质量，最快"
+    echo -e "    4) opus-4.6-thinking      — Claude Opus，适合偏好 Anthropic 模型"
+    echo -e "    5) 自定义                 — 手动输入模型名"
     echo ""
 
     local choice
     choice=$(prompt_choice "选择" "1")
 
     case "$choice" in
-        1) SELECTED_MODEL="gpt-5.3-codex-xhigh" ;;
-        2) SELECTED_MODEL="gpt-5.3-codex-high" ;;
-        3) SELECTED_MODEL="gpt-5.3-codex" ;;
+        1) SELECTED_MODEL="gpt-5.5-extra-high" ;;
+        2) SELECTED_MODEL="gpt-5.5-high" ;;
+        3) SELECTED_MODEL="gpt-5.5-medium" ;;
         4) SELECTED_MODEL="opus-4.6-thinking" ;;
         5)
             echo ""
             echo -e "  ${DIM}可用模型列表:${NC}"
             HTTP_PROXY= HTTPS_PROXY= agent --list-models 2>&1 | grep -E "^\S" | head -20
             echo ""
-            SELECTED_MODEL=$(prompt_choice "输入模型名" "gpt-5.3-codex-xhigh")
+            SELECTED_MODEL=$(prompt_choice "输入模型名" "gpt-5.5-extra-high")
             ;;
-        *) SELECTED_MODEL="gpt-5.3-codex-xhigh" ;;
+        *) SELECTED_MODEL="gpt-5.5-extra-high" ;;
     esac
 
     echo ""

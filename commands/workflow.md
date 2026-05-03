@@ -29,7 +29,7 @@ Default executor is **claude** (you). Cursor Agent is the reviewer.
 
 ### How to call the reviewer for ad-hoc conclusions:
 ```bash
-response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "你正在 review 一个技术建议。
+response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.5-extra-high "你正在 review 一个技术建议。
 
 上下文: <context>
 
@@ -124,7 +124,7 @@ sparring review-code <task-id>        # auto-calls agent with diff
 
 **Option 2: Call agent directly (for ad-hoc conclusion review):**
 ```bash
-response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.3-codex-xhigh "<review prompt>")
+response=$(HTTP_PROXY= HTTPS_PROXY= agent --print --trust --model gpt-5.5-extra-high "<review prompt>")
 ```
 
 **Important notes on calling agent:**

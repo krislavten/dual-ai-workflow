@@ -801,14 +801,14 @@ load_agent_config() {
 
     if [[ ! -f "$config_file" ]]; then
         echo -e "${DIM}  未找到 agent 配置: ${config_file}，使用默认值${NC}" >&2
-        AGENT_MODEL="gpt-5.3-codex"
+        AGENT_MODEL="gpt-5.5-extra-high"
         return 0
     fi
 
     # 解析 model: 从 "model: xxx" 行提取
     AGENT_MODEL=$(grep -E '^model:' "$config_file" | head -1 | sed 's/^model:[[:space:]]*//')
     if [[ -z "$AGENT_MODEL" ]]; then
-        AGENT_MODEL="gpt-5.3-codex"
+        AGENT_MODEL="gpt-5.5-extra-high"
     fi
 
     # 解析 system prompt: ## System Prompt 之后的所有内容

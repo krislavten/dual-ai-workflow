@@ -102,7 +102,7 @@ echo "=== load_agent_config ==="
 test_load_config_real_file() {
     source_workflow_funcs
     load_agent_config "cursor"
-    assert_eq "loads model from cursor.md" "gpt-5.3-codex-xhigh" "$AGENT_MODEL"
+    assert_eq "loads model from cursor.md" "gpt-5.5-extra-high" "$AGENT_MODEL"
     assert_contains "loads system prompt" "严格的代码审查专家" "$AGENT_SYSTEM_PROMPT"
     assert_contains "prompt includes APPROVE format" "APPROVE" "$AGENT_SYSTEM_PROMPT"
     assert_contains "prompt includes CONCERNS format" "CONCERNS" "$AGENT_SYSTEM_PROMPT"
@@ -112,7 +112,7 @@ test_load_config_real_file
 test_load_config_missing_file() {
     source_workflow_funcs
     load_agent_config "nonexistent" 2>/dev/null
-    assert_eq "falls back to default model" "gpt-5.3-codex" "$AGENT_MODEL"
+    assert_eq "falls back to default model" "gpt-5.5-extra-high" "$AGENT_MODEL"
     assert_eq "empty system prompt" "" "$AGENT_SYSTEM_PROMPT"
 }
 test_load_config_missing_file
