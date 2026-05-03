@@ -430,7 +430,17 @@ AGENTEOF
 run_verify() {
     print_step 5 5 "验证安装"
 
+    # verify 失败不阻塞 setup 完成提示（verify return 1 是给 CI/脚本用的）
+    # 首次安装时用户可能还没配 API key 或登录 backend，这很正常
+    set +e
     HTTP_PROXY= HTTPS_PROXY= bash "${PROJECT_DIR}/bin/sparring" verify 2>&1
+    local rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        echo ""
+        echo -e "${YELLOW}⚠ verify 报告有问题，但 setup 已经完成。${NC}"
+        echo -e "${DIM}  按上面提示配置 backend / api_key 后重跑 sparring verify 即可。${NC}"
+    fi
 }
 
 # ─── 主流程 ──────────────────────────────────────────────────
